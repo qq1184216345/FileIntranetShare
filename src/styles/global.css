@@ -1,0 +1,53 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  color: #2c3e50;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 背景渐变：主机端浅紫粉，贴近原设计 */
+.host-bg {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #c6b8fd 0%, #efb7e3 50%, #f7b9d2 100%);
+  overflow-y: auto;
+}
+
+.guest-bg {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #e6eeff 0%, #f5ecff 50%, #ffe8f3 100%);
+  overflow-y: auto;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}

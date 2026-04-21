@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>FileShare - 前端未构建</title>
+<style>
+  html,body{height:100%;margin:0}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",Arial,sans-serif;
+    background:linear-gradient(180deg,#ecfeff 0%,#f0fdfa 50%,#f5fbff 100%);
+    display:flex;align-items:center;justify-content:center;color:#0f172a
+  }
+  .card{
+    background:#fff;padding:28px 36px;border-radius:16px;
+    box-shadow:0 10px 30px rgba(0,0,0,.06);max-width:460px;width:90%
+  }
+  h1{margin:0 0 8px;font-size:22px}
+  p{color:#475569;line-height:1.7;margin:6px 0}
+  code{background:#f1f5f9;padding:3px 6px;border-radius:4px;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+  .tag{display:inline-block;background:#ecfeff;color:#0891b2;padding:2px 8px;border-radius:10px;font-size:12px;margin-left:6px}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>FileShare <span class="tag">前端未构建</span></h1>
+    <p>Rust 服务已就绪，但找不到前端产物 <code>dist/</code>。</p>
+    <p>请在项目根目录执行一次：</p>
+    <p><code>pnpm build</code></p>
+    <p>若希望开发期实时生效，另开一个终端运行：</p>
+    <p><code>pnpm build:watch</code></p>
+    <p>然后刷新本页即可。</p>
+  </div>
+</body>
+</html>

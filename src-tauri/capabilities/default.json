@@ -1,0 +1,23 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-unminimize",
+    "core:window:allow-close",
+    "opener:default",
+    "opener:allow-reveal-item-in-dir",
+    "opener:allow-open-url",
+    "store:default",
+    "autostart:default",
+    "fs:default",
+    "dialog:default",
+    "os:default",
+    "clipboard-manager:default"
+  ]
+}
