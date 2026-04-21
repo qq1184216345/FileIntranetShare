@@ -5,6 +5,8 @@ description = "FileShare - 局域网文件 / 文本共享工具（Tauri 2 + Vue 
 authors = ["FileShare Contributors"]
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/qq1184216345/FileIntranetShare"
+homepage = "https://github.com/qq1184216345/FileIntranetShare"
 readme = "../README.md"
 
 [lib]
