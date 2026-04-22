@@ -27,7 +27,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": "all",
     "category": "Utility",
     "shortDescription": "局域网文件 / 文本共享工具",
     "longDescription": "在局域网内一键启动 HTTP 服务，同网段浏览器即可访问上传文件、分享文本。支持密码保护、大文件分片续传、二维码快速连接、剪贴板一键分享、系统托盘常驻、记录持久化。",
