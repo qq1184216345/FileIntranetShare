@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Release notes 本地草稿（用于复制粘贴到 GitHub Release 页）
+RELEASE_NOTES_*.md
