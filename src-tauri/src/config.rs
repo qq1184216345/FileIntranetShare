@@ -18,7 +18,7 @@ impl Default for AppConfig {
         Self {
             auto_start: false,
             upload_dir: PathBuf::new(),
-            port: 5421,
+            port: 18888,
             password_enabled: false,
             password: String::new(),
             https_enabled: false,

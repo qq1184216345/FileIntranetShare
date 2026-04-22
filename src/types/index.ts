@@ -11,7 +11,7 @@ export interface AppConfig {
 export const DEFAULT_CONFIG: AppConfig = {
   autoStart: false,
   uploadDir: "",
-  port: 5421,
+  port: 18888,
   passwordEnabled: false,
   password: "",
   httpsEnabled: false,
