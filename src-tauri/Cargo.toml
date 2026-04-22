@@ -1,6 +1,6 @@
 [package]
 name = "fileshare"
-version = "0.1.0"
+version = "0.1.1"
 description = "FileShare - 局域网文件 / 文本共享工具（Tauri 2 + Vue 3 + axum）"
 authors = ["FileShare Contributors"]
 edition = "2021"

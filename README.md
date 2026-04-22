@@ -75,15 +75,15 @@ pnpm tauri:build
 产物位置：
 
 ```
-src-tauri/target/release/bundle/nsis/FileShare_0.1.0_x64-setup.exe
+src-tauri/target/release/bundle/nsis/FileShare_0.1.1_x64-setup.exe
 ```
 
-实测体积（0.1.0 release + LTO + strip）：
+实测体积（0.1.1 release + LTO + strip）：
 
 | 产物 | 大小 |
 |---|---|
-| `fileshare.exe`（解压后可执行文件） | **7.07 MB** |
-| `FileShare_0.1.0_x64-setup.exe`（NSIS 安装包） | **2.78 MB** |
+| `fileshare.exe`（解压后可执行文件） | **7.10 MB** |
+| `FileShare_0.1.1_x64-setup.exe`（NSIS 安装包） | **2.79 MB** |
 
 | 项 | 说明 |
 |---|---|
