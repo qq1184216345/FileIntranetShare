@@ -467,10 +467,11 @@ function download(file: ShareFile) {
 <style scoped>
 .guest-root {
   min-height: 100vh;
-  background: linear-gradient(180deg, #ecfeff 0%, #f0fdfa 50%, #f5fbff 100%);
-  color: #0f172a;
+  background: var(--fs-guest-bg);
+  color: var(--fs-card-title);
   display: flex;
   flex-direction: column;
+  transition: background 0.25s ease;
 }
 
 .header {
@@ -495,7 +496,7 @@ function download(file: ShareFile) {
   height: 40px;
   border-radius: 10px;
   background: linear-gradient(135deg, #06b6d4 0%, #0ea5e9 100%);
-  color: white;
+  color: #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -510,7 +511,7 @@ function download(file: ShareFile) {
 }
 .brand-sub {
   font-size: 12px;
-  color: #64748b;
+  color: var(--fs-card-text);
 }
 
 .main {
@@ -530,39 +531,39 @@ function download(file: ShareFile) {
   border: 2px dashed #a5f3fc;
   border-radius: 16px;
   padding: 36px 20px;
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--fs-card-bg-translucent);
   text-align: center;
   cursor: pointer;
   transition: all 0.2s ease;
 }
 .dropzone:hover {
-  border-color: #06b6d4;
-  background: rgba(255, 255, 255, 0.85);
+  border-color: var(--fs-accent-cyan);
+  background: var(--fs-card-bg-elevated);
 }
 .dropzone.is-drag {
-  border-color: #06b6d4;
-  background: #ecfeff;
+  border-color: var(--fs-accent-cyan);
+  background: var(--fs-accent-cyan-bg);
   transform: scale(1.01);
 }
 .dropzone-icon {
-  color: #0ea5e9;
+  color: var(--fs-accent-cyan-text);
 }
 .dropzone-title {
   font-size: 15px;
   margin-top: 8px;
-  color: #0f172a;
+  color: var(--fs-card-title);
   font-weight: 500;
 }
 .dropzone-sub {
   font-size: 12px;
-  color: #64748b;
+  color: var(--fs-card-text);
   margin-top: 4px;
 }
 
 .section-title {
   font-size: 13px;
   font-weight: 600;
-  color: #475569;
+  color: var(--fs-card-label);
   margin-bottom: 10px;
   display: flex;
   align-items: center;
@@ -576,10 +577,10 @@ function download(file: ShareFile) {
   gap: 10px;
 }
 .task {
-  background: white;
+  background: var(--fs-card-bg);
   border-radius: 10px;
   padding: 12px 14px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 .task-head {
   display: flex;
@@ -598,7 +599,7 @@ function download(file: ShareFile) {
   display: flex;
   justify-content: space-between;
   font-size: 11px;
-  color: #64748b;
+  color: var(--fs-card-text);
   margin-top: 4px;
 }
 .task-status {
@@ -615,8 +616,8 @@ function download(file: ShareFile) {
   font-size: 10px;
   padding: 1px 5px;
   border-radius: 4px;
-  background: #ecfeff;
-  color: #0891b2;
+  background: var(--fs-accent-cyan-bg);
+  color: var(--fs-accent-cyan-deep);
   border: 1px solid #a5f3fc;
   line-height: 1.4;
 }
@@ -637,16 +638,16 @@ function download(file: ShareFile) {
   gap: 10px;
 }
 .text-card {
-  background: white;
+  background: var(--fs-card-bg);
   border-radius: 10px;
   padding: 12px 14px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 .text-content {
   font-size: 14px;
   white-space: pre-wrap;
   word-break: break-all;
-  color: #0f172a;
+  color: var(--fs-card-title);
   line-height: 1.5;
 }
 .text-meta {
@@ -654,7 +655,7 @@ function download(file: ShareFile) {
   gap: 8px;
   align-items: center;
   font-size: 12px;
-  color: #64748b;
+  color: var(--fs-card-text);
   margin-top: 8px;
 }
 
@@ -669,9 +670,9 @@ function download(file: ShareFile) {
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
-  background: white;
+  background: var(--fs-card-bg);
   border-radius: 10px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   cursor: pointer;
   transition: box-shadow 0.15s ease, transform 0.1s ease;
 }
@@ -680,7 +681,7 @@ function download(file: ShareFile) {
   transform: translateY(-1px);
 }
 .file-icon {
-  color: #0ea5e9;
+  color: var(--fs-accent-cyan-text);
   flex-shrink: 0;
 }
 .file-info {
@@ -690,7 +691,7 @@ function download(file: ShareFile) {
 .file-name {
   font-size: 14px;
   font-weight: 500;
-  color: #0f172a;
+  color: var(--fs-card-title);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -699,7 +700,7 @@ function download(file: ShareFile) {
   display: flex;
   gap: 6px;
   font-size: 11px;
-  color: #64748b;
+  color: var(--fs-card-text);
   margin-top: 3px;
   white-space: nowrap;
   overflow: hidden;
@@ -712,7 +713,7 @@ function download(file: ShareFile) {
 
 .footer {
   text-align: center;
-  color: #94a3b8;
+  color: var(--fs-card-muted);
   font-size: 12px;
   padding: 16px 0 24px;
 }

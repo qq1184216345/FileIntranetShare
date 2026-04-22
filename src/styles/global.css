@@ -5,6 +5,101 @@
   color: #2c3e50;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* ---------- 浅色主题变量 ---------- */
+  --fs-text-primary: #2c3e50;
+  --fs-text-secondary: #666;
+  --fs-text-tertiary: #999;
+  --fs-text-muted: #94a3b8;
+  --fs-text-link: #1e90ff;
+  --fs-divider: #eee;
+  --fs-border-soft: #e5e7eb;
+  --fs-row-hover: rgba(0, 0, 0, 0.03);
+  --fs-scrollbar-thumb: rgba(0, 0, 0, 0.15);
+  --fs-scrollbar-thumb-hover: rgba(0, 0, 0, 0.3);
+  --fs-qr-bg: #ffffff;
+  --fs-mono-text: #334155;
+
+  --fs-host-bg: linear-gradient(
+    135deg,
+    #c6b8fd 0%,
+    #efb7e3 50%,
+    #f7b9d2 100%
+  );
+  --fs-guest-bg: linear-gradient(
+    135deg,
+    #e6eeff 0%,
+    #f5ecff 50%,
+    #ffe8f3 100%
+  );
+  --fs-ripple-mask: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 0.55) 0%,
+    rgba(255, 255, 255, 0) 70%
+  );
+
+  /* Guest 卡片 / Login 页用色 */
+  --fs-card-bg: #ffffff;
+  --fs-card-bg-translucent: rgba(255, 255, 255, 0.6);
+  --fs-card-bg-elevated: rgba(255, 255, 255, 0.85);
+  --fs-card-title: #0f172a;
+  --fs-card-text: #64748b;
+  --fs-card-label: #475569;
+  --fs-card-muted: #94a3b8;
+  --fs-accent-cyan: #06b6d4;
+  --fs-accent-cyan-text: #0ea5e9;
+  --fs-accent-cyan-deep: #0891b2;
+  --fs-accent-cyan-bg: #ecfeff;
+}
+
+html.dark {
+  /* ---------- 暗色主题变量 ---------- */
+  color: #d8dadd;
+  color-scheme: dark;
+
+  --fs-text-primary: #e4e7eb;
+  --fs-text-secondary: #a8adb5;
+  --fs-text-tertiary: #7a7f87;
+  --fs-text-muted: #6b7280;
+  --fs-text-link: #6ba9ff;
+  --fs-divider: #2a2f36;
+  --fs-border-soft: #353b44;
+  --fs-row-hover: rgba(255, 255, 255, 0.04);
+  --fs-scrollbar-thumb: rgba(255, 255, 255, 0.15);
+  --fs-scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);
+  /* 二维码必须在浅色底上才能稳定识别 */
+  --fs-qr-bg: #e6eaf0;
+  --fs-mono-text: #c9d1d9;
+
+  --fs-host-bg: linear-gradient(
+    135deg,
+    #1f1a3a 0%,
+    #2a1e3a 50%,
+    #2d1c30 100%
+  );
+  --fs-guest-bg: linear-gradient(
+    135deg,
+    #101632 0%,
+    #1a1430 50%,
+    #261524 100%
+  );
+  --fs-ripple-mask: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 0.1) 0%,
+    rgba(255, 255, 255, 0) 70%
+  );
+
+  --fs-card-bg: #1c222a;
+  --fs-card-bg-translucent: rgba(255, 255, 255, 0.04);
+  --fs-card-bg-elevated: rgba(255, 255, 255, 0.07);
+  --fs-card-title: #e4e7eb;
+  --fs-card-text: #a0a5ac;
+  --fs-card-label: #c0c6cd;
+  --fs-card-muted: #6b7078;
+  --fs-accent-cyan: #38bdf8;
+  --fs-accent-cyan-text: #7dd3fc;
+  --fs-accent-cyan-deep: #38bdf8;
+  --fs-accent-cyan-bg: rgba(8, 145, 178, 0.18);
 }
 
 * {
@@ -26,28 +121,30 @@ body,
   flex-direction: column;
 }
 
-/* 背景渐变：主机端浅紫粉，贴近原设计 */
+/* 主机端 / 访客端背景（渐变跟随主题） */
 .host-bg {
   min-height: 100vh;
-  background: linear-gradient(135deg, #c6b8fd 0%, #efb7e3 50%, #f7b9d2 100%);
+  background: var(--fs-host-bg);
   overflow-y: auto;
+  transition: background 0.25s ease;
 }
 
 .guest-bg {
   min-height: 100vh;
-  background: linear-gradient(135deg, #e6eeff 0%, #f5ecff 50%, #ffe8f3 100%);
+  background: var(--fs-guest-bg);
   overflow-y: auto;
+  transition: background 0.25s ease;
 }
 
-/* 滚动条美化 */
+/* 滚动条 */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.15);
+  background: var(--fs-scrollbar-thumb);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--fs-scrollbar-thumb-hover);
 }

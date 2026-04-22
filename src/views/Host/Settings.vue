@@ -144,7 +144,7 @@ function handleCancel() {
 <style scoped>
 .settings-hint {
   font-size: 12px;
-  color: #64748b;
+  color: var(--fs-card-text);
   line-height: 1.5;
 }
 </style>

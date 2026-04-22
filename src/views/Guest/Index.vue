@@ -79,6 +79,6 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(180deg, #ecfeff 0%, #f0fdfa 50%, #f5fbff 100%);
+  background: var(--fs-guest-bg);
 }
 </style>

@@ -1,9 +1,18 @@
 <script setup lang="ts">
 import { onMounted } from "vue";
-import { NConfigProvider, NDialogProvider, NMessageProvider, NNotificationProvider, zhCN, dateZhCN } from "naive-ui";
+import {
+  NConfigProvider,
+  NDialogProvider,
+  NMessageProvider,
+  NNotificationProvider,
+  zhCN,
+  dateZhCN,
+} from "naive-ui";
 import { useConfigStore } from "./stores/config";
+import { useTheme } from "./composables/useTheme";
 
 const configStore = useConfigStore();
+const { naiveTheme } = useTheme();
 
 onMounted(async () => {
   try {
@@ -15,7 +24,12 @@ onMounted(async () => {
 </script>
 
 <template>
-  <NConfigProvider :locale="zhCN" :date-locale="dateZhCN" :theme-overrides="themeOverrides">
+  <NConfigProvider
+    :locale="zhCN"
+    :date-locale="dateZhCN"
+    :theme="naiveTheme"
+    :theme-overrides="themeOverrides"
+  >
     <NDialogProvider>
       <NNotificationProvider>
         <NMessageProvider>

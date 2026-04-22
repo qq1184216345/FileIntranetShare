@@ -477,10 +477,10 @@ function fileItem(id: string) {
   border-radius: 6px;
 }
 .row:hover {
-  background: rgba(0, 0, 0, 0.03);
+  background: var(--fs-row-hover);
 }
 .col-ip {
-  color: #666;
+  color: var(--fs-text-secondary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   overflow: hidden;
@@ -493,7 +493,7 @@ function fileItem(id: string) {
   white-space: nowrap;
 }
 .col-meta {
-  color: #999;
+  color: var(--fs-text-tertiary);
   font-size: 12px;
   text-align: right;
   white-space: nowrap;

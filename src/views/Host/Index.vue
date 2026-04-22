@@ -13,6 +13,7 @@ import { SettingsOutline, QrCodeOutline } from "@vicons/ionicons5";
 import Settings from "./Settings.vue";
 import ShareList from "./ShareList.vue";
 import QrCode from "../../components/QrCode.vue";
+import ThemeSwitch from "../../components/ThemeSwitch.vue";
 import { useConfigStore } from "../../stores/config";
 import { useServerStore } from "../../stores/server";
 import {
@@ -159,12 +160,15 @@ async function onConfigUpdate(cfg: typeof configStore.config) {
   <div class="host-bg">
     <div class="host-container">
       <div class="top-bar">
-        <NButton size="small" @click="showSettings = true">
-          <template #icon>
-            <NIcon><SettingsOutline /></NIcon>
-          </template>
-          设置
-        </NButton>
+        <NSpace :size="6">
+          <ThemeSwitch />
+          <NButton size="small" @click="showSettings = true">
+            <template #icon>
+              <NIcon><SettingsOutline /></NIcon>
+            </template>
+            设置
+          </NButton>
+        </NSpace>
       </div>
 
       <div v-if="!running" class="start-wrap">
@@ -304,11 +308,7 @@ async function onConfigUpdate(cfg: typeof configStore.config) {
 .ripple-ring {
   padding: 24px;
   border-radius: 50%;
-  background: radial-gradient(
-    circle,
-    rgba(255, 255, 255, 0.55) 0%,
-    rgba(255, 255, 255, 0) 70%
-  );
+  background: var(--fs-ripple-mask);
 }
 
 .start-btn {
@@ -367,7 +367,7 @@ async function onConfigUpdate(cfg: typeof configStore.config) {
 }
 
 .share-url a {
-  color: #1e90ff;
+  color: var(--fs-text-link);
   text-decoration: none;
   word-break: break-all;
 }
@@ -377,7 +377,7 @@ async function onConfigUpdate(cfg: typeof configStore.config) {
 
 .divider {
   height: 1px;
-  background: #eee;
+  background: var(--fs-divider);
   margin: 10px 0;
 }
 
@@ -390,8 +390,8 @@ async function onConfigUpdate(cfg: typeof configStore.config) {
   flex-shrink: 0;
   padding: 4px;
   border-radius: 10px;
-  background: white;
-  border: 1px solid #e5e7eb;
+  background: var(--fs-qr-bg);
+  border: 1px solid var(--fs-border-soft);
   cursor: pointer;
   transition: box-shadow 0.15s ease, transform 0.15s ease;
 }
@@ -420,13 +420,13 @@ async function onConfigUpdate(cfg: typeof configStore.config) {
 .qr-modal-url {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
-  color: #334155;
+  color: var(--fs-mono-text);
   word-break: break-all;
   text-align: center;
   max-width: 320px;
 }
 .qr-modal-tip {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--fs-text-muted);
 }
 </style>
