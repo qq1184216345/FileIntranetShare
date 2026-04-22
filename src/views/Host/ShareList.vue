@@ -18,8 +18,8 @@ import {
   FolderOpenOutline,
   CopyOutline,
   ClipboardOutline,
+  CloudUploadOutline,
 } from "@vicons/ionicons5";
-import { useConfigStore } from "../../stores/config";
 import { useServerStore } from "../../stores/server";
 import { formatSize, formatTime } from "../../utils/format";
 import {
@@ -28,12 +28,15 @@ import {
   deleteText,
   postText,
 } from "../../api/guest";
-import { shareClipboard } from "../../api/host";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import {
+  shareClipboard,
+  shareLocalFiles,
+  revealSharedFile,
+} from "../../api/host";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { appendTokenToUrl } from "../../api/auth";
 import type { ShareFile, ShareText } from "../../types";
 
-const configStore = useConfigStore();
 const serverStore = useServerStore();
 const message = useMessage();
 const dialog = useDialog();
@@ -224,12 +227,11 @@ async function copyText(content: string) {
 
 async function openFolder(f: ShareFile) {
   try {
-    const uploadDir = configStore.config.uploadDir;
-    const path = `${uploadDir}/${f.id}/${f.name}`.replace(/\\/g, "/");
-    await revealItemInDir(path);
-  } catch (e) {
+    await revealSharedFile(f.id);
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
     console.warn(e);
-    message.warning("打开文件夹失败");
+    message.warning(msg || "打开文件夹失败");
   }
 }
 
@@ -251,6 +253,48 @@ async function submitText() {
     message.error(String(e?.message ?? e));
   } finally {
     textSubmitting.value = false;
+  }
+}
+
+// ========== 从本机选择文件分享 ==========
+
+const pickingLocal = ref(false);
+
+function shortenPath(p: string) {
+  if (p.length <= 44) return p;
+  return p.slice(0, 18) + "..." + p.slice(-22);
+}
+
+async function handlePickLocal() {
+  if (pickingLocal.value) return;
+  if (!serverStore.running) {
+    message.warning("请先启动服务");
+    return;
+  }
+  try {
+    const picked = await openFileDialog({
+      multiple: true,
+      directory: false,
+      title: "选择要分享的本机文件（零拷贝）",
+    });
+    if (!picked) return;
+    const paths = Array.isArray(picked) ? picked : [picked];
+    if (paths.length === 0) return;
+    pickingLocal.value = true;
+    const res = await shareLocalFiles(paths);
+    if (res.added.length > 0) {
+      message.success(`已添加 ${res.added.length} 个文件到分享列表`);
+    }
+    for (const s of res.skipped) {
+      message.warning(`${shortenPath(s.path)}：${s.reason}`);
+    }
+    if (res.added.length === 0 && res.skipped.length === 0) {
+      message.info("未选中文件");
+    }
+  } catch (e: any) {
+    message.error(String(e?.message ?? e));
+  } finally {
+    pickingLocal.value = false;
   }
 }
 
@@ -327,6 +371,18 @@ function fileItem(id: string) {
       <NSpace :size="8">
         <NButton
           size="small"
+          :loading="pickingLocal"
+          :disabled="!serverStore.running"
+          title="从本机选择文件加入分享列表（零拷贝，也支持直接拖拽到窗口）"
+          @click="handlePickLocal"
+        >
+          <template #icon>
+            <NIcon><CloudUploadOutline /></NIcon>
+          </template>
+          本机文件
+        </NButton>
+        <NButton
+          size="small"
           :loading="clipboardSharing"
           :disabled="!serverStore.running"
           title="把本地剪贴板里的图片或文本一键加入列表"
@@ -357,7 +413,14 @@ function fileItem(id: string) {
     </div>
 
     <div v-if="rows.length === 0" class="empty-wrap">
-      <NEmpty description="暂无分享内容 — 等待局域网用户上传" />
+      <NEmpty>
+        <template #default>
+          <div class="empty-title">暂无分享内容</div>
+          <div class="empty-sub">
+            拖拽文件到窗口、点击「本机文件」，或等待局域网用户上传
+          </div>
+        </template>
+      </NEmpty>
     </div>
 
     <div v-else class="items">
@@ -462,6 +525,15 @@ function fileItem(id: string) {
 }
 .empty-wrap {
   padding: 24px 0;
+}
+.empty-title {
+  font-size: 14px;
+  color: var(--fs-text-secondary);
+}
+.empty-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--fs-text-tertiary);
 }
 .items {
   display: flex;

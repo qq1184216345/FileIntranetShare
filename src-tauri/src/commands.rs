@@ -249,6 +249,125 @@ fn save_clipboard_image(
     })
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareLocalItem {
+    pub id: String,
+    pub name: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareLocalSkipped {
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareLocalResult {
+    pub added: Vec<ShareLocalItem>,
+    pub skipped: Vec<ShareLocalSkipped>,
+}
+
+/// 在系统文件管理器中定位分享列表里某条文件记录的真实路径。
+/// 直接根据 FileItem.path 打开——对零拷贝引用的本机文件也能正确定位，
+/// 不再依赖 "uploadDir/id/name" 的拼接约定。
+#[tauri::command]
+pub fn reveal_shared_file(slot: State<'_, ServerSlot>, id: String) -> Result<(), String> {
+    let state = {
+        let guard = slot.lock();
+        guard
+            .as_ref()
+            .map(|h| h.state.clone())
+            .ok_or_else(|| "服务未运行".to_string())?
+    };
+    let item = state
+        .registry
+        .get_file(&id)
+        .ok_or_else(|| "记录不存在".to_string())?;
+    if !item.path.exists() {
+        return Err("文件已被移动或删除".into());
+    }
+    tauri_plugin_opener::reveal_item_in_dir(&item.path).map_err(|e| format!("打开失败: {e}"))
+}
+
+/// 把一批本地文件"登记"到分享列表（零拷贝：记录的是原路径）。
+/// 原文件被移走 / 删除后，下载链接会 404；下次启动服务时 Registry 的
+/// reconcile 机制会自动把记录清理掉。
+/// 传入的路径为目录或不存在的文件都会被 skip，不会中断整体提交。
+#[tauri::command]
+pub fn share_local_files(
+    slot: State<'_, ServerSlot>,
+    paths: Vec<String>,
+) -> Result<ShareLocalResult, String> {
+    let state = {
+        let guard = slot.lock();
+        guard
+            .as_ref()
+            .map(|h| h.state.clone())
+            .ok_or_else(|| "服务未运行".to_string())?
+    };
+
+    let mut added: Vec<ShareLocalItem> = Vec::new();
+    let mut skipped: Vec<ShareLocalSkipped> = Vec::new();
+
+    for raw in paths {
+        let path = PathBuf::from(&raw);
+        let md = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => {
+                skipped.push(ShareLocalSkipped {
+                    path: raw,
+                    reason: "文件不存在或不可访问".into(),
+                });
+                continue;
+            }
+        };
+        if md.is_dir() {
+            skipped.push(ShareLocalSkipped {
+                path: raw,
+                reason: "暂不支持目录（请先打包为 zip 等单文件）".into(),
+            });
+            continue;
+        }
+        if !md.is_file() {
+            skipped.push(ShareLocalSkipped {
+                path: raw,
+                reason: "不是常规文件".into(),
+            });
+            continue;
+        }
+
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".into());
+        let size = md.len();
+        let mime = mime_guess::from_path(&path)
+            .first_or_octet_stream()
+            .to_string();
+        let id = nanoid!(16);
+
+        let item = FileItem {
+            id: id.clone(),
+            name: name.clone(),
+            size,
+            mime,
+            uploader_ip: "host".into(),
+            created_at: now_secs(),
+            path: path.clone(),
+        };
+        state.registry.add_file(item.clone());
+        state.broadcast(SyncEvent::FileAdded { file: item });
+
+        added.push(ShareLocalItem { id, name, size });
+    }
+
+    Ok(ShareLocalResult { added, skipped })
+}
+
 fn save_clipboard_text(
     state: &std::sync::Arc<server::state::AppState>,
     content: String,

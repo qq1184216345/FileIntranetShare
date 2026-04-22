@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NButton,
   NCard,
@@ -9,7 +9,11 @@ import {
   NModal,
   useMessage,
 } from "naive-ui";
-import { SettingsOutline, QrCodeOutline } from "@vicons/ionicons5";
+import {
+  SettingsOutline,
+  QrCodeOutline,
+  CloudUploadOutline,
+} from "@vicons/ionicons5";
 import Settings from "./Settings.vue";
 import ShareList from "./ShareList.vue";
 import QrCode from "../../components/QrCode.vue";
@@ -24,8 +28,10 @@ import {
   pickDefaultIp,
   updateTrayStatus,
   refreshServerAuth,
+  shareLocalFiles,
   isTauri,
 } from "../../api/host";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 const configStore = useConfigStore();
 const serverStore = useServerStore();
@@ -34,12 +40,60 @@ const message = useMessage();
 const showSettings = ref(false);
 const showQr = ref(false);
 const busy = ref(false);
+const dragOver = ref(false);
 
 const running = computed(() => serverStore.running);
 const shareUrl = computed(() => serverStore.url);
 
+let unlistenDrag: (() => void) | null = null;
+
+function shortenPath(p: string) {
+  if (p.length <= 44) return p;
+  return p.slice(0, 18) + "..." + p.slice(-22);
+}
+
+async function handleDropPaths(paths: string[]) {
+  if (!paths || paths.length === 0) return;
+  if (!serverStore.running) {
+    message.warning("请先启动服务后再拖入文件");
+    return;
+  }
+  try {
+    const res = await shareLocalFiles(paths);
+    if (res.added.length > 0) {
+      message.success(`已添加 ${res.added.length} 个文件到分享列表`);
+    }
+    for (const s of res.skipped) {
+      message.warning(`${shortenPath(s.path)}：${s.reason}`);
+    }
+    if (res.added.length === 0 && res.skipped.length === 0) {
+      message.info("没有可添加的文件");
+    }
+  } catch (e: any) {
+    message.error(String(e?.message ?? e));
+  }
+}
+
 onMounted(async () => {
   if (!isTauri) return;
+  try {
+    const win = getCurrentWebviewWindow();
+    unlistenDrag = await win.onDragDropEvent((ev: any) => {
+      const t = ev?.payload?.type;
+      if (t === "enter" || t === "over") {
+        dragOver.value = true;
+      } else if (t === "leave") {
+        dragOver.value = false;
+      } else if (t === "drop") {
+        dragOver.value = false;
+        const paths: string[] = ev?.payload?.paths ?? [];
+        handleDropPaths(paths);
+      }
+    });
+  } catch (e) {
+    console.warn("drag-drop listen failed:", e);
+  }
+
   try {
     const list = await getNetworkInterfaces();
     serverStore.setInterfaces(list);
@@ -53,6 +107,15 @@ onMounted(async () => {
     }
   } catch (e) {
     console.error("init server status failed:", e);
+  }
+});
+
+onUnmounted(() => {
+  if (unlistenDrag) {
+    try {
+      unlistenDrag();
+    } catch {}
+    unlistenDrag = null;
   }
 });
 
@@ -252,6 +315,21 @@ async function onConfigUpdate(cfg: typeof configStore.config) {
       @update="onConfigUpdate"
     />
 
+    <div v-if="dragOver" class="drag-overlay">
+      <div class="drag-overlay-inner">
+        <NIcon :size="56" class="drag-overlay-icon">
+          <CloudUploadOutline />
+        </NIcon>
+        <div class="drag-overlay-title">释放以添加到分享列表</div>
+        <div class="drag-overlay-sub">
+          支持多选 · 文件以"零拷贝"方式引用本地路径
+        </div>
+        <div v-if="!running" class="drag-overlay-warn">
+          服务未启动，释放后不会生效
+        </div>
+      </div>
+    </div>
+
     <NModal
       v-model:show="showQr"
       preset="card"
@@ -428,5 +506,58 @@ async function onConfigUpdate(cfg: typeof configStore.config) {
 .qr-modal-tip {
   font-size: 12px;
   color: var(--fs-text-muted);
+}
+
+.drag-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(61, 135, 242, 0.16);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  pointer-events: none;
+  animation: fs-drag-in 0.12s ease-out;
+}
+:global(html.dark) .drag-overlay {
+  background: rgba(61, 135, 242, 0.24);
+}
+@keyframes fs-drag-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.drag-overlay-inner {
+  padding: 36px 56px;
+  border-radius: 18px;
+  border: 2px dashed #3d87f2;
+  background: var(--fs-card-bg, rgba(255, 255, 255, 0.9));
+  color: var(--fs-card-text, #1f1f1f);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 14px 48px rgba(61, 135, 242, 0.3);
+}
+.drag-overlay-icon {
+  color: #3d87f2;
+}
+.drag-overlay-title {
+  font-size: 18px;
+  font-weight: 600;
+}
+.drag-overlay-sub {
+  font-size: 12px;
+  color: var(--fs-text-muted);
+}
+.drag-overlay-warn {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #f0a020;
 }
 </style>

@@ -58,6 +58,40 @@ export async function shareClipboard(): Promise<ShareClipboardResult> {
   return invoke<ShareClipboardResult>("share_clipboard");
 }
 
+export interface ShareLocalItem {
+  id: string;
+  name: string;
+  size: number;
+}
+
+export interface ShareLocalSkipped {
+  path: string;
+  reason: string;
+}
+
+export interface ShareLocalResult {
+  added: ShareLocalItem[];
+  skipped: ShareLocalSkipped[];
+}
+
+/**
+ * 把一批本机文件的绝对路径登记到分享列表（零拷贝，原文件移走后记录失效）。
+ * 成功后服务端会通过 WS 广播 fileAdded，本地 ShareList 会自动刷新。
+ */
+export async function shareLocalFiles(
+  paths: string[],
+): Promise<ShareLocalResult> {
+  return invoke<ShareLocalResult>("share_local_files", { paths });
+}
+
+/**
+ * 在系统文件管理器中定位分享列表里某条文件（按记录中的真实路径）。
+ * 对访客上传、剪贴板图片、本机引用文件一视同仁。
+ */
+export async function revealSharedFile(id: string): Promise<void> {
+  return invoke("reveal_shared_file", { id });
+}
+
 /**
  * 保存配置后调用，把最新 AppConfig 热应用到运行中的服务。
  * 返回 rotated=true 表示密码相关变化已触发 JWT 轮换，在线访客需重新登录。

@@ -65,6 +65,8 @@ pub fn run() {
             commands::quit_app,
             commands::refresh_server_auth,
             commands::share_clipboard,
+            commands::share_local_files,
+            commands::reveal_shared_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
