@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "FileShare",
   "version": "0.1.0",
-  "identifier": "com.fileshare.app",
+  "identifier": "com.fileshare.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -48,7 +48,8 @@
         "installMode": "currentUser",
         "languages": ["SimpChinese", "English"],
         "displayLanguageSelector": false,
-        "compression": "lzma"
+        "compression": "lzma",
+        "installerIcon": "icons/icon.ico"
       }
     }
   },

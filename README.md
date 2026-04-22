@@ -15,8 +15,8 @@
 - [x] 系统托盘常驻：左键弹主窗、右键菜单启停服务 / 打开分享链接 / 退出
 - [x] 剪贴板一键分享：Host 点按钮把剪贴板图片（自动编码 PNG）或文本加到列表
 - [x] 记录持久化：SQLite（`rusqlite` bundled）存储 files / texts，重启后下载链接继续可用，物理文件缺失自动 reconcile
-- [ ] 打包发布（进行中）
-- [ ] 暗色主题 / i18n
+- [x] 打包发布：NSIS 安装包（currentUser 免管理员，webview2 bootstrapper 按需下载）
+- [x] 暗色主题：`light` / `dark` / `system` 三态，Host 顶栏一键切换，Guest 跟随访客浏览器系统主题
 
 ## 技术栈
 
@@ -78,28 +78,57 @@ pnpm tauri:build
 src-tauri/target/release/bundle/nsis/FileShare_0.1.0_x64-setup.exe
 ```
 
+实测体积（0.1.0 release + LTO + strip）：
+
+| 产物 | 大小 |
+|---|---|
+| `fileshare.exe`（解压后可执行文件） | **7.07 MB** |
+| `FileShare_0.1.0_x64-setup.exe`（NSIS 安装包） | **2.78 MB** |
+
 | 项 | 说明 |
 |---|---|
 | **格式** | NSIS（`tauri.conf.json` 里 `bundle.targets = ["nsis"]`）|
 | **安装模式** | `currentUser`：不需要管理员，装到用户目录下的 `%LocalAppData%\Programs\FileShare\` |
-| **体积** | 首次打包约 8–12 MB（不含 WebView2） |
-| **WebView2** | 使用 `downloadBootstrapper`，安装时若系统未装会自动拉；Win11 已内置可忽略 |
-| **中文** | NSIS 语言默认简中，不弹语言选择框 |
+| **压缩** | LZMA |
+| **WebView2** | `downloadBootstrapper`：安装时若系统未装会按需拉；Win11 已内置可忽略 |
+| **语言** | NSIS 默认简中，不弹语言选择框（代码里配了 `SimpChinese` / `English`） |
 
 首次启动服务时 Windows 防火墙会弹一次 UAC（用 `netsh` 写入规则 `FileShare-HTTP`），之后不会再问。
 
+### 国内网络：GitHub 下载镜像
+
+Tauri CLI 打包时需从 GitHub 下载 NSIS 工具链和 `nsis_tauri_utils.dll`，**国内网络几乎必超时**。
+Tauri 2 支持环境变量 `TAURI_BUNDLER_TOOLS_GITHUB_MIRROR` 重定向下载地址：
+
+```powershell
+# PowerShell（当前会话生效）
+$env:TAURI_BUNDLER_TOOLS_GITHUB_MIRROR = "https://ghfast.top/https://github.com"
+pnpm tauri:build
+
+# 永久写入用户环境变量
+[Environment]::SetEnvironmentVariable("TAURI_BUNDLER_TOOLS_GITHUB_MIRROR", "https://ghfast.top/https://github.com", "User")
+```
+
+可替代镜像：`https://gh-proxy.com/https://github.com`、`https://ghproxy.net/https://github.com` 等。
+下载内容会缓存到 `%LOCALAPPDATA%\tauri\NSIS\`，后续打包只要缓存不被清就不再重下。
+
+### 首次打包耗时
+
+- Rust **release 首次全量编译**：约 **4–7 分钟**（LTO + codegen-units=1 拖慢链接）
+- 后续增量：约 **2–3 分钟**（改了 Rust 代码）/ **10–20 秒**（只改前端）
+- `[profile.release]` 设了 `opt-level = "z"` + `lto = true` + `strip = "symbols"` + `panic = "abort"`
+
 ### 出 MSI（可选）
 
-```
-# 临时切 targets
+```powershell
 pnpm tauri build --bundles msi
 ```
 
-需要额外下载 WiX Toolset（Tauri CLI 首次会自动处理）。
+需要额外下载 WiX Toolset（Tauri CLI 首次会自动处理，同样受 GitHub 网络影响，可用同一个镜像环境变量解决）。
 
 ### 代码签名（可选，未启用）
 
-Windows 用户首次运行未签名 exe 时 SmartScreen 会提示"未识别的发布者"，点「更多信息 → 仍要运行」即可。
+Windows 用户首次运行未签名 exe 时 SmartScreen 会提示「未识别的发布者」——点「更多信息 → 仍要运行」即可。
 若要消除该提示需购买 EV / OV 代码签名证书并在 `tauri.conf.json` 的 `bundle.windows` 下配置 `certificateThumbprint` / `digestAlgorithm` / `timestampUrl`。
 
 ### 替换应用图标
@@ -179,8 +208,8 @@ owner 用固定 `owner_token`（服务启动时 nanoid(32) 随机生成），vis
 
 ## 持久化数据位置
 
-- **配置**（`AppConfig`）：`%AppData%\com.fileshare.app\store.json`
-- **记录数据库**（文件 + 文本）：`%AppData%\com.fileshare.app\fileshare.db`
+- **配置**（`AppConfig`）：`%AppData%\com.fileshare.desktop\store.json`
+- **记录数据库**（文件 + 文本）：`%AppData%\com.fileshare.desktop\fileshare.db`
 - **上传实体文件**：用户在设置中指定的 `uploadDir`
 
 > 切换 `uploadDir` 不会迁移旧文件；旧记录的下载链接仍指向原目录文件，新上传落到新目录。

@@ -42,7 +42,10 @@ pub fn ensure_rule(port: u16) {
 #[cfg(not(windows))]
 pub fn ensure_rule(_port: u16) {}
 
+/// 保留给后续"卸载时清理"或托盘菜单"移除防火墙规则"功能调用。
+/// 当前主流程未使用，但主动暴露比悄悄删除更稳妥 —— 避免以后要清理时找不到入口。
 #[cfg(windows)]
+#[allow(dead_code)]
 pub fn remove_rule(port: u16) {
     use std::process::Command;
     let rule_name = format!("FileShare-{port}");
@@ -55,4 +58,5 @@ pub fn remove_rule(port: u16) {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 pub fn remove_rule(_port: u16) {}
