@@ -32,6 +32,7 @@ import {
   isTauri,
 } from "../../api/host";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { copyToClipboard } from "../../utils/clipboard";
 
 const configStore = useConfigStore();
 const serverStore = useServerStore();
@@ -161,10 +162,10 @@ async function toggleServer() {
 
 async function copyLink() {
   if (!shareUrl.value) return;
-  try {
-    await navigator.clipboard.writeText(shareUrl.value);
+  const ok = await copyToClipboard(shareUrl.value);
+  if (ok) {
     message.success("已复制");
-  } catch {
+  } else {
     message.error("复制失败");
   }
 }

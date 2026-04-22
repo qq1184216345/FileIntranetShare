@@ -33,6 +33,7 @@ import {
 } from "../../api/guest";
 import { ChunkedUploader, type ChunkedStatus } from "../../api/chunk-upload";
 import { formatSize, formatTime, fileKind } from "../../utils/format";
+import { copyToClipboard } from "../../utils/clipboard";
 import { useSync } from "../../composables/useSync";
 import type { ShareFile, ShareText } from "../../types";
 
@@ -235,11 +236,11 @@ async function submitText() {
 }
 
 async function copyText(content: string) {
-  try {
-    await navigator.clipboard.writeText(content);
+  const ok = await copyToClipboard(content);
+  if (ok) {
     message.success("已复制");
-  } catch {
-    message.error("复制失败（HTTPS 环境才可用）");
+  } else {
+    message.error("复制失败，请长按文本手动选择复制");
   }
 }
 

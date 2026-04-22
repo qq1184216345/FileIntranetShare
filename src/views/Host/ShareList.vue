@@ -35,6 +35,7 @@ import {
 } from "../../api/host";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { appendTokenToUrl } from "../../api/auth";
+import { copyToClipboard } from "../../utils/clipboard";
 import type { ShareFile, ShareText } from "../../types";
 
 const serverStore = useServerStore();
@@ -208,19 +209,20 @@ async function removeText(id: string) {
 // ========== 辅助操作 ==========
 
 async function copyDownloadLink(id: string) {
-  try {
-    await navigator.clipboard.writeText(`${serverStore.url}/api/file/${encodeURIComponent(id)}`);
+  const url = `${serverStore.url}/api/file/${encodeURIComponent(id)}`;
+  const ok = await copyToClipboard(url);
+  if (ok) {
     message.success("下载链接已复制");
-  } catch {
+  } else {
     message.error("复制失败");
   }
 }
 
 async function copyText(content: string) {
-  try {
-    await navigator.clipboard.writeText(content);
+  const ok = await copyToClipboard(content);
+  if (ok) {
     message.success("已复制");
-  } catch {
+  } else {
     message.error("复制失败");
   }
 }
