@@ -121,18 +121,25 @@ body,
   flex-direction: column;
 }
 
-/* 主机端 / 访客端背景（渐变跟随主题） */
+/* 主机端 / 访客端背景（渐变跟随主题）
+   说明：#app 设了 overflow:hidden，背景容器必须自己是有固定高度的独立滚动容器，
+   否则内容撑开 min-height:100vh 后会被父级裁剪、又触发不了自身滚动。
+   使用 100dvh 规避手机浏览器地址栏收起/展开时 100vh 抖动。 */
 .host-bg {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   background: var(--fs-host-bg);
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   transition: background 0.25s ease;
 }
 
 .guest-bg {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   background: var(--fs-guest-bg);
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   transition: background 0.25s ease;
 }
 
