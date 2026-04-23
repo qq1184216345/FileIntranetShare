@@ -6,6 +6,8 @@ export interface AppConfig {
   password: string;
   httpsEnabled: boolean;
   bindIpv6: boolean;
+  /** 磁盘最小保留空间（MB）。上传时若剩余 < (文件大小 + 此值)，拒绝。0 为禁用。 */
+  diskMinFreeMb: number;
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -16,6 +18,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   password: "",
   httpsEnabled: false,
   bindIpv6: false,
+  diskMinFreeMb: 500,
 };
 
 export interface NetworkInterface {

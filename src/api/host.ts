@@ -23,6 +23,14 @@ export async function setAutoStart(enabled: boolean): Promise<void> {
   return invoke("set_auto_start", { enabled });
 }
 
+/**
+ * 当前 Tauri 进程是否由"开机自启"机制拉起（而非用户手动打开）。
+ * 用于判断是否应该在启动时自动开启 HTTP 服务。
+ */
+export async function isLaunchedByAutostart(): Promise<boolean> {
+  return invoke<boolean>("is_launched_by_autostart");
+}
+
 export async function updateTrayStatus(
   running: boolean,
   shareUrl: string,
@@ -90,6 +98,58 @@ export async function shareLocalFiles(
  */
 export async function revealSharedFile(id: string): Promise<void> {
   return invoke("reveal_shared_file", { id });
+}
+
+export interface OrphanItem {
+  path: string;
+  size: number;
+}
+
+export interface CleanupOrphansResult {
+  items: OrphanItem[];
+  totalSize: number;
+  removed: boolean;
+}
+
+/**
+ * 扫描/清理 uploadDir 下的孤儿文件（物理存在但没有分享记录）。
+ * dryRun=true 仅返回清单，dryRun=false 实际执行删除。
+ */
+export async function cleanupOrphans(
+  dryRun: boolean,
+): Promise<CleanupOrphansResult> {
+  return invoke<CleanupOrphansResult>("cleanup_orphans", { dryRun });
+}
+
+/**
+ * 修复 Windows 防火墙入站规则（非 Windows 上无操作）。
+ * 此命令会触发 UAC 弹窗，仅应在用户显式点击时调用。
+ */
+export async function repairFirewallRule(): Promise<void> {
+  return invoke("repair_firewall_rule");
+}
+
+export interface AuditLog {
+  id: number;
+  ts: number;
+  kind: string;
+  ip: string;
+  detail: string;
+}
+
+/**
+ * 查询审计日志（按时间倒序，默认 200 条）。
+ */
+export async function listAuditLogs(
+  limit = 200,
+  offset = 0,
+): Promise<AuditLog[]> {
+  return invoke<AuditLog[]>("list_audit_logs", { limit, offset });
+}
+
+/** 清空全部审计日志 */
+export async function clearAuditLogs(): Promise<void> {
+  return invoke("clear_audit_logs");
 }
 
 /**

@@ -13,9 +13,11 @@ import {
   SettingsOutline,
   QrCodeOutline,
   CloudUploadOutline,
+  TimeOutline,
 } from "@vicons/ionicons5";
 import Settings from "./Settings.vue";
 import ShareList from "./ShareList.vue";
+import AuditLog from "./AuditLog.vue";
 import QrCode from "../../components/QrCode.vue";
 import ThemeSwitch from "../../components/ThemeSwitch.vue";
 import { useConfigStore } from "../../stores/config";
@@ -29,6 +31,7 @@ import {
   updateTrayStatus,
   refreshServerAuth,
   shareLocalFiles,
+  isLaunchedByAutostart,
   isTauri,
 } from "../../api/host";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -40,6 +43,7 @@ const message = useMessage();
 
 const showSettings = ref(false);
 const showQr = ref(false);
+const showAudit = ref(false);
 const busy = ref(false);
 const dragOver = ref(false);
 
@@ -105,11 +109,48 @@ onMounted(async () => {
       if (!serverStore.currentIp) {
         serverStore.setCurrentIp(pickDefaultIp(list));
       }
+    } else {
+      // 开机自启场景：仅当 Tauri 进程是由系统开机自启拉起（而非用户手动打开）
+      // 且用户在设置里打开了"开机自启"，并且已经配置过上传目录时，自动启动服务。
+      // 需等 configStore.init() 完成后才能读取 autoStart/uploadDir 配置。
+      await waitConfigLoaded();
+      try {
+        const fromAutostart = await isLaunchedByAutostart();
+        if (
+          fromAutostart &&
+          configStore.config.autoStart &&
+          configStore.config.uploadDir
+        ) {
+          const st = await startServer(configStore.config);
+          serverStore.applyStatus(st);
+          if (!serverStore.currentIp) {
+            serverStore.setCurrentIp(pickDefaultIp(list));
+          }
+          console.info(`[autostart] server auto-started on :${st.port}`);
+        }
+      } catch (e) {
+        console.warn("[autostart] auto-start server failed:", e);
+      }
     }
   } catch (e) {
     console.error("init server status failed:", e);
   }
 });
+
+async function waitConfigLoaded() {
+  if (configStore.loaded) return;
+  await new Promise<void>((resolve) => {
+    const stop = watch(
+      () => configStore.loaded,
+      (v) => {
+        if (v) {
+          stop();
+          resolve();
+        }
+      },
+    );
+  });
+}
 
 onUnmounted(() => {
   if (unlistenDrag) {
@@ -226,6 +267,17 @@ async function onConfigUpdate(cfg: typeof configStore.config) {
       <div class="top-bar">
         <NSpace :size="6">
           <ThemeSwitch />
+          <NButton
+            v-if="running"
+            size="small"
+            @click="showAudit = true"
+            title="查看访问日志"
+          >
+            <template #icon>
+              <NIcon><TimeOutline /></NIcon>
+            </template>
+            日志
+          </NButton>
           <NButton size="small" @click="showSettings = true">
             <template #icon>
               <NIcon><SettingsOutline /></NIcon>
@@ -315,6 +367,8 @@ async function onConfigUpdate(cfg: typeof configStore.config) {
       :config="configStore.config"
       @update="onConfigUpdate"
     />
+
+    <AuditLog v-model:show="showAudit" />
 
     <div v-if="dragOver" class="drag-overlay">
       <div class="drag-overlay-inner">

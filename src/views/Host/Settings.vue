@@ -11,11 +11,14 @@ import {
   NButton,
   NSpace,
   NInputGroup,
+  NDivider,
   useMessage,
+  useDialog,
 } from "naive-ui";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { AppConfig } from "../../types";
 import { DEFAULT_CONFIG } from "../../types";
+import { cleanupOrphans, repairFirewallRule } from "../../api/host";
 
 const props = defineProps<{
   show: boolean;
@@ -28,7 +31,55 @@ const emit = defineEmits<{
 }>();
 
 const message = useMessage();
+const dialog = useDialog();
 const form = ref<AppConfig>({ ...DEFAULT_CONFIG });
+const cleaning = ref(false);
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+async function handleRepairFirewall() {
+  try {
+    await repairFirewallRule();
+    message.success("已请求添加防火墙规则（请在弹出的 UAC 中点击允许）");
+  } catch (e: any) {
+    message.error(`修复失败: ${e?.message || e}`);
+  }
+}
+
+async function handleCleanupOrphans() {
+  cleaning.value = true;
+  try {
+    const preview = await cleanupOrphans(true);
+    if (preview.items.length === 0) {
+      message.success("磁盘很干净，没有孤儿文件");
+      return;
+    }
+    const sizeText = formatBytes(preview.totalSize);
+    dialog.warning({
+      title: "发现孤儿文件",
+      content: `在上传目录下扫描到 ${preview.items.length} 个没有分享记录的物理文件，合计 ${sizeText}。是否立即删除？（删除后不可恢复）`,
+      positiveText: "全部删除",
+      negativeText: "取消",
+      onPositiveClick: async () => {
+        try {
+          const done = await cleanupOrphans(false);
+          message.success(`已清理 ${done.items.length} 个孤儿文件（${formatBytes(done.totalSize)}）`);
+        } catch (e: any) {
+          message.error(`清理失败: ${e?.message || e}`);
+        }
+      },
+    });
+  } catch (e: any) {
+    message.error(`扫描失败: ${e?.message || e}`);
+  } finally {
+    cleaning.value = false;
+  }
+}
 
 watch(
   () => props.show,
@@ -90,8 +141,11 @@ function handleCancel() {
       @close="handleCancel"
     >
       <NForm label-placement="left" :label-width="90" size="medium">
-        <NFormItem label="服务自启">
-          <NSwitch v-model:value="form.autoStart" />
+        <NFormItem label="开机自启">
+          <NSpace align="center" :size="8">
+            <NSwitch v-model:value="form.autoStart" />
+            <span class="hint">开机后自动启动本软件，并自动开启分享服务</span>
+          </NSpace>
         </NFormItem>
 
         <NFormItem label="上传路径">
@@ -129,6 +183,46 @@ function handleCancel() {
             密码以 argon2 哈希保存；修改后立即生效，在线访客需要重新登录。
           </div>
         </NFormItem>
+
+        <NFormItem label="磁盘软限">
+          <NSpace vertical :size="4" style="width: 100%">
+            <NInputNumber
+              v-model:value="form.diskMinFreeMb"
+              :min="0"
+              :max="102400"
+              :step="100"
+              :show-button="false"
+              style="width: 100%"
+            >
+              <template #suffix>MB</template>
+            </NInputNumber>
+            <span class="hint">
+              上传前检查磁盘剩余，若 &lt; (文件大小 + 此值) 则拒绝。0 为不限制，默认 500MB。
+            </span>
+          </NSpace>
+        </NFormItem>
+
+        <NDivider style="margin: 8px 0 12px" />
+
+        <NFormItem label="磁盘清理">
+          <NSpace vertical :size="6" style="width: 100%">
+            <NButton :loading="cleaning" @click="handleCleanupOrphans">
+              扫描并清理孤儿文件
+            </NButton>
+            <span class="hint">
+              删除分享记录时默认保留源文件；使用此功能可回收"只剩物理文件、已无记录"的空间。
+            </span>
+          </NSpace>
+        </NFormItem>
+
+        <NFormItem label="防火墙">
+          <NSpace vertical :size="6" style="width: 100%">
+            <NButton @click="handleRepairFirewall">修复防火墙规则</NButton>
+            <span class="hint">
+              安装时已尝试自动添加；若端口被修改或 LAN 同事无法访问，点此补一次（会弹 UAC）。
+            </span>
+          </NSpace>
+        </NFormItem>
       </NForm>
 
       <template #footer>
@@ -146,5 +240,9 @@ function handleCancel() {
   font-size: 12px;
   color: var(--fs-card-text);
   line-height: 1.5;
+}
+.hint {
+  font-size: 12px;
+  color: var(--fs-card-text);
 }
 </style>
