@@ -46,11 +46,9 @@ if [[ ! -d node_modules ]]; then
 fi
 
 # --- 打包 ---
-# 关闭 signing & notarization（本项目未启用），避免 CI 环境报错。
-export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-}"
-
-echo "==> pnpm tauri build --target universal-apple-darwin"
-pnpm tauri build --target universal-apple-darwin
+# 本地/CI 默认关闭签名；若后续需要签名，改为直接调用 tauri build 并提供证书环境。
+echo "==> pnpm tauri build --target universal-apple-darwin --no-sign"
+pnpm tauri build --target universal-apple-darwin --no-sign
 
 BUNDLE_DIR="$REPO_ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
 if [[ -d "$BUNDLE_DIR" ]]; then
