@@ -1,25 +1,35 @@
+use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(feature = "export-ts")]
+use ts_rs::TS;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-ts", derive(TS))]
+#[cfg_attr(feature = "export-ts", ts(export, export_to = "../../src/bindings/"))]
 pub struct FileItem {
     pub id: String,
     pub name: String,
+    #[cfg_attr(feature = "export-ts", ts(type = "number"))]
     pub size: u64,
     pub mime: String,
     pub uploader_ip: String,
     pub created_at: i64,
     /// 服务器本地绝对路径（不下发给客户端）
     #[serde(skip)]
+    #[cfg_attr(feature = "export-ts", ts(skip))]
     pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-ts", derive(TS))]
+#[cfg_attr(feature = "export-ts", ts(export, export_to = "../../src/bindings/"))]
 pub struct TextItem {
     pub id: String,
     pub content: String,
@@ -29,14 +39,31 @@ pub struct TextItem {
 
 /// 文件 / 文本的内存清单，同时持久化到 SQLite（可选）。
 ///
-/// - 写操作：先写内存，再异步地 best-effort 写 DB（写失败仅 warn 不阻塞主流程）。
-/// - 读操作：直接读内存 Vec，零 I/O。
-/// - DB 不可用时 `db = None`，此时退化为纯内存 Registry，服务照常运行，仅失去持久化。
+/// 设计要点（P1-5 重构）：
+/// - 内部用 `IndexMap<String, Arc<Item>>` 同时获得 O(1) 按 id 查找与插入顺序遍历
+/// - 对外 list_* 只 clone `Arc`（8 字节），不 clone 整个结构体
+/// - 写操作先写内存再 best-effort 写 DB
 pub struct Registry {
-    files: RwLock<Vec<FileItem>>,
-    texts: RwLock<Vec<TextItem>>,
+    files: RwLock<IndexMap<String, Arc<FileItem>>>,
+    texts: RwLock<IndexMap<String, Arc<TextItem>>>,
     db: Option<Mutex<Connection>>,
 }
+
+/// 审计日志单条记录（P3-18）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "export-ts", derive(TS))]
+#[cfg_attr(feature = "export-ts", ts(export, export_to = "../../src/bindings/"))]
+pub struct AuditLog {
+    pub id: i64,
+    pub ts: i64,
+    pub kind: String,
+    pub ip: String,
+    pub detail: String,
+}
+
+/// 审计日志最多保留条数（超出按时间倒序裁剪）
+const AUDIT_KEEP: i64 = 2000;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
@@ -56,6 +83,14 @@ CREATE TABLE IF NOT EXISTS texts (
 );
 CREATE INDEX IF NOT EXISTS idx_files_created ON files(created_at);
 CREATE INDEX IF NOT EXISTS idx_texts_created ON texts(created_at);
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts     INTEGER NOT NULL,
+    kind   TEXT NOT NULL,
+    ip     TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_logs(ts DESC);
 "#;
 
 impl Registry {
@@ -80,8 +115,8 @@ impl Registry {
 
     fn memory_only() -> Self {
         Self {
-            files: RwLock::new(Vec::new()),
-            texts: RwLock::new(Vec::new()),
+            files: RwLock::new(IndexMap::new()),
+            texts: RwLock::new(IndexMap::new()),
             db: None,
         }
     }
@@ -91,13 +126,11 @@ impl Registry {
             std::fs::create_dir_all(parent).ok();
         }
         let conn = Connection::open(path)?;
-        // 使用 WAL 提升并发 / 容灾
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
         conn.execute_batch(SCHEMA)?;
 
-        // 加载文件
-        let mut files: Vec<FileItem> = {
+        let mut files: IndexMap<String, Arc<FileItem>> = {
             let mut stmt = conn.prepare(
                 "SELECT id, name, size, mime, uploader_ip, created_at, path \
                  FROM files ORDER BY created_at ASC",
@@ -113,19 +146,21 @@ impl Registry {
                     path: PathBuf::from(row.get::<_, String>(6)?),
                 })
             })?;
-            rows.filter_map(Result::ok).collect()
+            let mut map = IndexMap::new();
+            for item in rows.filter_map(Result::ok) {
+                map.insert(item.id.clone(), Arc::new(item));
+            }
+            map
         };
 
         // Reconcile：磁盘上找不到的文件直接从记录里剔除
-        let mut missing: Vec<String> = Vec::new();
-        files.retain(|f| {
-            if f.path.exists() {
-                true
-            } else {
-                missing.push(f.id.clone());
-                false
-            }
-        });
+        let missing: Vec<String> = files
+            .iter()
+            .filter_map(|(id, it)| if it.path.exists() { None } else { Some(id.clone()) })
+            .collect();
+        for id in &missing {
+            files.shift_remove(id);
+        }
         if !missing.is_empty() {
             let mut stmt = conn.prepare("DELETE FROM files WHERE id = ?1")?;
             for id in &missing {
@@ -137,8 +172,7 @@ impl Registry {
             );
         }
 
-        // 加载文本
-        let texts: Vec<TextItem> = {
+        let texts: IndexMap<String, Arc<TextItem>> = {
             let mut stmt = conn.prepare(
                 "SELECT id, content, uploader_ip, created_at FROM texts ORDER BY created_at ASC",
             )?;
@@ -150,7 +184,11 @@ impl Registry {
                     created_at: row.get(3)?,
                 })
             })?;
-            rows.filter_map(Result::ok).collect()
+            let mut map = IndexMap::new();
+            for item in rows.filter_map(Result::ok) {
+                map.insert(item.id.clone(), Arc::new(item));
+            }
+            map
         };
 
         tracing::info!(
@@ -169,7 +207,7 @@ impl Registry {
 
     // ========== Files ==========
 
-    pub fn add_file(&self, item: FileItem) {
+    pub fn add_file(&self, item: FileItem) -> Arc<FileItem> {
         if let Some(db) = &self.db {
             let res = db.lock().execute(
                 "INSERT OR REPLACE INTO files(id, name, size, mime, uploader_ip, created_at, path) \
@@ -188,24 +226,22 @@ impl Registry {
                 tracing::warn!("persist add_file failed: {e}");
             }
         }
-        self.files.write().push(item);
+        let arc = Arc::new(item);
+        self.files.write().insert(arc.id.clone(), arc.clone());
+        arc
     }
 
-    pub fn list_files(&self) -> Vec<FileItem> {
-        self.files.read().clone()
+    /// 返回所有文件的 Arc 视图（廉价 clone：只 clone 指针计数）
+    pub fn list_files(&self) -> Vec<Arc<FileItem>> {
+        self.files.read().values().cloned().collect()
     }
 
-    pub fn get_file(&self, id: &str) -> Option<FileItem> {
-        self.files.read().iter().find(|f| f.id == id).cloned()
+    pub fn get_file(&self, id: &str) -> Option<Arc<FileItem>> {
+        self.files.read().get(id).cloned()
     }
 
-    pub fn remove_file(&self, id: &str) -> Option<FileItem> {
-        let removed = {
-            let mut g = self.files.write();
-            g.iter()
-                .position(|f| f.id == id)
-                .map(|idx| g.remove(idx))
-        };
+    pub fn remove_file(&self, id: &str) -> Option<Arc<FileItem>> {
+        let removed = self.files.write().shift_remove(id);
         if removed.is_some() {
             if let Some(db) = &self.db {
                 if let Err(e) = db.lock().execute("DELETE FROM files WHERE id = ?1", [id]) {
@@ -216,9 +252,14 @@ impl Registry {
         removed
     }
 
+    /// 返回所有文件记录持有的 path 快照（用于扫描孤儿物理文件，P1-6）
+    pub fn known_file_paths(&self) -> Vec<PathBuf> {
+        self.files.read().values().map(|f| f.path.clone()).collect()
+    }
+
     // ========== Texts ==========
 
-    pub fn add_text(&self, item: TextItem) {
+    pub fn add_text(&self, item: TextItem) -> Arc<TextItem> {
         if let Some(db) = &self.db {
             let res = db.lock().execute(
                 "INSERT OR REPLACE INTO texts(id, content, uploader_ip, created_at) \
@@ -229,20 +270,17 @@ impl Registry {
                 tracing::warn!("persist add_text failed: {e}");
             }
         }
-        self.texts.write().push(item);
+        let arc = Arc::new(item);
+        self.texts.write().insert(arc.id.clone(), arc.clone());
+        arc
     }
 
-    pub fn list_texts(&self) -> Vec<TextItem> {
-        self.texts.read().clone()
+    pub fn list_texts(&self) -> Vec<Arc<TextItem>> {
+        self.texts.read().values().cloned().collect()
     }
 
-    pub fn remove_text(&self, id: &str) -> Option<TextItem> {
-        let removed = {
-            let mut g = self.texts.write();
-            g.iter()
-                .position(|t| t.id == id)
-                .map(|idx| g.remove(idx))
-        };
+    pub fn remove_text(&self, id: &str) -> Option<Arc<TextItem>> {
+        let removed = self.texts.write().shift_remove(id);
         if removed.is_some() {
             if let Some(db) = &self.db {
                 if let Err(e) = db.lock().execute("DELETE FROM texts WHERE id = ?1", [id]) {
@@ -251,6 +289,68 @@ impl Registry {
             }
         }
         removed
+    }
+
+    // ========== Audit Log (P3-18) ==========
+
+    /// 追加一条审计日志；DB 不可用时静默忽略。
+    /// 写入后按阈值做一次软性 prune（删除超出 AUDIT_KEEP 的旧记录）。
+    pub fn log_audit(&self, kind: &str, ip: &str, detail: &str) {
+        let Some(db) = &self.db else { return };
+        let ts = super::state::now_secs();
+        let conn = db.lock();
+        if let Err(e) = conn.execute(
+            "INSERT INTO audit_logs(ts, kind, ip, detail) VALUES(?1, ?2, ?3, ?4)",
+            params![ts, kind, ip, detail],
+        ) {
+            tracing::debug!("audit log insert failed: {e}");
+            return;
+        }
+        // 低成本 prune：每 200 次写入执行一次，避免每次都 DELETE
+        // 注意：bundled rusqlite 未开启 SQLITE_ENABLE_UPDATE_DELETE_LIMIT，
+        // 所以 DELETE 不能用 LIMIT/OFFSET；改成按 id 上界批删。
+        let last_id = conn.last_insert_rowid();
+        if last_id % 200 == 0 {
+            let _ = conn.execute(
+                "DELETE FROM audit_logs WHERE id <= (\
+                    SELECT id FROM audit_logs ORDER BY id DESC LIMIT 1 OFFSET ?1)",
+                params![AUDIT_KEEP],
+            );
+        }
+    }
+
+    /// 查询最近的审计日志（按 ts 倒序）
+    pub fn list_audit(&self, limit: i64, offset: i64) -> Vec<AuditLog> {
+        let Some(db) = &self.db else { return Vec::new() };
+        let conn = db.lock();
+        let limit = limit.clamp(1, 500);
+        let offset = offset.max(0);
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT id, ts, kind, ip, detail FROM audit_logs \
+             ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+        ) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map(params![limit, offset], |row| {
+            Ok(AuditLog {
+                id: row.get(0)?,
+                ts: row.get(1)?,
+                kind: row.get(2)?,
+                ip: row.get(3)?,
+                detail: row.get(4)?,
+            })
+        });
+        match rows {
+            Ok(it) => it.filter_map(Result::ok).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// 清空审计日志（供 Host 端按钮调用）
+    pub fn clear_audit(&self) {
+        if let Some(db) = &self.db {
+            let _ = db.lock().execute("DELETE FROM audit_logs", []);
+        }
     }
 
     #[allow(dead_code)]

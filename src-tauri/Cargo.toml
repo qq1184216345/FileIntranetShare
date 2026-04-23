@@ -48,6 +48,7 @@ parking_lot = "0.12"
 urlencoding = "2"
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+indexmap = "2"
 
 # 鉴权
 argon2 = "0.5"
@@ -59,6 +60,13 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 # 持久化：文件 / 文本 记录
 rusqlite = { version = "0.32", features = ["bundled"] }
+fs4 = "1.0.0"
+
+# P3-16: 前端类型自动生成。只在 cargo 开启 `export-ts` feature 时编译，
+# 默认不引入 derive 宏，避免影响常规构建耗时与二进制大小。
+# 使用：`cargo test --features export-ts export_bindings` 把 TS 类型写到 ../src/bindings/
+ts-rs = { version = "^10", optional = true }
+
 
 # ---------- 发布构建优化 ----------
 # 目标：压小二进制体积（LTO + strip + 单 codegen unit），
@@ -71,5 +79,9 @@ codegen-units = 1      # 关闭并行 codegen，允许更彻底优化
 strip = "symbols"      # 去掉调试符号
 panic = "abort"        # panic 直接中止，省掉 unwind 表（我们没有 catch_unwind 依赖）
 incremental = false    # release 关闭增量，彻底构建更稳定
+
+[features]
+# P3-16: 开启后编译时会把关键 Rust 类型通过 ts-rs 宏展开，test 中再导出成 TS
+export-ts = ["dep:ts-rs"]
 
 # dev 保持默认（快编译 + 完整调试信息）

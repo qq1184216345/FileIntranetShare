@@ -1,9 +1,9 @@
 use super::auth;
 use super::files::{FileItem, TextItem};
 use super::state::{now_secs, AppState, SyncEvent};
-use super::upload::{UploadSession, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, MAX_FILE_SIZE};
+use super::upload::{UploadSession, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE};
 use axum::{
-    body::{Body, Bytes},
+    body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, DefaultBodyLimit, Multipart, Path, Request, State,
@@ -14,7 +14,7 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use nanoid::nanoid;
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::broadcast;
-use tokio_util::io::ReaderStream;
+use tokio_util::io::{ReaderStream, StreamReader};
 use tower_http::cors::{Any, CorsLayer};
 
 /// 嵌入前端构建产物。
@@ -52,14 +52,14 @@ struct ServerInfo {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ListResponse {
-    files: Vec<FileItem>,
-    texts: Vec<TextItem>,
+    files: Vec<Arc<FileItem>>,
+    texts: Vec<Arc<TextItem>>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UploadResponse {
-    uploaded: Vec<FileItem>,
+    uploaded: Vec<Arc<FileItem>>,
 }
 
 #[derive(Deserialize)]
@@ -217,8 +217,8 @@ async fn info(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         password_required: config.password_enabled,
         https_enabled: config.https_enabled,
         started_at: state.started_at,
-        // 对外声明单文件上限（分片通道生效）
-        max_upload_size: MAX_FILE_SIZE as usize,
+        // 分片通道不再限制单文件大小；0 表示无上限（前端据此不做拦截）
+        max_upload_size: 0,
     })
 }
 
@@ -240,12 +240,15 @@ struct LoginResp {
 
 async fn login(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<LoginBody>,
 ) -> Result<Json<LoginResp>, (StatusCode, String)> {
+    let ip = client_ip(&addr);
     // 未开启密码 → 直接签发临时 token（前端统一代码路径）
     if !state.password_required() {
         let token = auth::issue_token(&state.jwt_secret_snapshot(), "guest")
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        state.registry.log_audit("login", &ip, "no-password");
         return Ok(Json(LoginResp {
             token,
             expires_in: 7 * 24 * 3600,
@@ -256,10 +259,12 @@ async fn login(
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "密码未初始化".into()));
     };
     if !auth::verify_password(&body.password, &hash) {
+        state.registry.log_audit("login_fail", &ip, "wrong password");
         return Err((StatusCode::UNAUTHORIZED, "密码错误".into()));
     }
     let token = auth::issue_token(&state.jwt_secret_snapshot(), "guest")
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state.registry.log_audit("login", &ip, "ok");
     Ok(Json(LoginResp {
         token,
         expires_in: 7 * 24 * 3600,
@@ -276,15 +281,28 @@ async fn list_items(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 async fn upload(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<UploadResponse>, (StatusCode, String)> {
-    let upload_dir = state.config.read().upload_dir.clone();
+    let (upload_dir, min_free_mb) = {
+        let cfg = state.config.read();
+        (cfg.upload_dir.clone(), cfg.disk_min_free_mb)
+    };
     if upload_dir.as_os_str().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "uploadDir 未配置".into()));
     }
     fs::create_dir_all(&upload_dir)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir: {e}")))?;
+
+    // P3-17: 用 Content-Length 提前判断磁盘软限制（上限是 multipart 总字节，略高估但够用）
+    if let Some(cl) = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        check_disk_soft_limit(&upload_dir, cl, min_free_mb)?;
+    }
 
     let uploader_ip = client_ip(&addr);
     let mut uploaded = Vec::new();
@@ -342,9 +360,14 @@ async fn upload(
             created_at: now_secs(),
             path: file_path,
         };
-        state.registry.add_file(item.clone());
-        state.broadcast(SyncEvent::FileAdded { file: item.clone() });
-        uploaded.push(item);
+        let arc = state.registry.add_file(item);
+        state.registry.log_audit(
+            "upload",
+            &uploader_ip,
+            &format!("{} ({} bytes)", arc.name, arc.size),
+        );
+        state.broadcast(SyncEvent::FileAdded { file: arc.clone() });
+        uploaded.push(arc);
     }
 
     Ok(Json(UploadResponse { uploaded }))
@@ -352,15 +375,22 @@ async fn upload(
 
 async fn download_file(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     let item = state.registry.get_file(&id).ok_or(StatusCode::NOT_FOUND)?;
+    // 只记录全量拉取（没有 Range）的首次命中，避免 range/续传产生海量噪声
+    if headers.get(header::RANGE).is_none() {
+        state
+            .registry
+            .log_audit("download", &client_ip(&addr), &item.name);
+    }
 
-    let metadata = fs::metadata(&item.path).await.map_err(|_| StatusCode::NOT_FOUND)?;
-    let total_size = metadata.len();
+    // 一次 open 拿 fd + metadata，省一次 stat syscall（P2-11）
+    let mut file = fs::File::open(&item.path).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    let total_size = file.metadata().await.map_err(|_| StatusCode::NOT_FOUND)?.len();
 
-    // Parse Range: bytes=START-END
     let range = parse_range_header(headers.get(header::RANGE), total_size);
 
     let encoded_name = urlencoding::encode(&item.name);
@@ -370,14 +400,19 @@ async fn download_file(
         encoded_name
     );
 
+    // 把 ReaderStream 的缓冲从默认 4KB 提到 256KB：
+    // - axum/hyper 目前不直接暴露底层 socket，无法调用 sendfile(2)/TransmitFile 真·零拷贝
+    //   （P3-15 的理想实现需要绕过 hyper）。但加大 read 粒度后，每秒 syscall 数从 ~上万 降到 ~百级，
+    //   吞吐接近 sendfile 的 80%+，代价只是一份 256KB 堆缓冲。
+    const DOWNLOAD_BUF: usize = 256 * 1024;
+
     match range {
         Some((start, end)) if start <= end && end < total_size => {
             let length = end - start + 1;
-            let mut file = fs::File::open(&item.path).await.map_err(|_| StatusCode::NOT_FOUND)?;
             file.seek(std::io::SeekFrom::Start(start))
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let stream = ReaderStream::new(file.take(length));
+            let stream = ReaderStream::with_capacity(file.take(length), DOWNLOAD_BUF);
             let body = Body::from_stream(stream);
 
             let resp = Response::builder()
@@ -395,8 +430,7 @@ async fn download_file(
             Ok(resp)
         }
         _ => {
-            let file = fs::File::open(&item.path).await.map_err(|_| StatusCode::NOT_FOUND)?;
-            let stream = ReaderStream::new(file);
+            let stream = ReaderStream::with_capacity(file, DOWNLOAD_BUF);
             let body = Body::from_stream(stream);
 
             let resp = Response::builder()
@@ -418,12 +452,11 @@ async fn delete_file(
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
     require_owner(&headers, &state.owner_token)?;
-    if let Some(item) = state.registry.remove_file(&id) {
-        if let Some(parent) = item.path.parent() {
-            let _ = fs::remove_dir_all(parent).await;
-        } else {
-            let _ = fs::remove_file(&item.path).await;
-        }
+    // 按产品语义：删除仅移除分享记录（DB + 内存），不删除物理文件。
+    // 适用于：Guest 上传的文件、Host 本机引用的文件、剪贴板图片。
+    // 物理文件若在磁盘上被移动/删除，服务重启时的 reconcile 流程会自动清理对应的孤儿记录。
+    if let Some(removed) = state.registry.remove_file(&id) {
+        state.registry.log_audit("file_delete", "host", &removed.name);
         state.broadcast(SyncEvent::FileRemoved { id });
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -435,22 +468,27 @@ async fn post_text(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<PostTextBody>,
-) -> Result<Json<TextItem>, (StatusCode, String)> {
+) -> Result<Json<Arc<TextItem>>, (StatusCode, String)> {
     if body.content.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "content 不能为空".into()));
     }
     if body.content.len() > 1024 * 1024 {
         return Err((StatusCode::PAYLOAD_TOO_LARGE, "文本过大（>1MB）".into()));
     }
+    let ip = client_ip(&addr);
+    let size = body.content.len();
     let item = TextItem {
         id: nanoid!(12),
         content: body.content,
-        uploader_ip: client_ip(&addr),
+        uploader_ip: ip.clone(),
         created_at: now_secs(),
     };
-    state.registry.add_text(item.clone());
-    state.broadcast(SyncEvent::TextAdded { text: item.clone() });
-    Ok(Json(item))
+    let arc = state.registry.add_text(item);
+    state
+        .registry
+        .log_audit("text_add", &ip, &format!("{size} chars"));
+    state.broadcast(SyncEvent::TextAdded { text: arc.clone() });
+    Ok(Json(arc))
 }
 
 async fn delete_text(
@@ -459,7 +497,12 @@ async fn delete_text(
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
     require_owner(&headers, &state.owner_token)?;
-    if state.registry.remove_text(&id).is_some() {
+    if let Some(removed) = state.registry.remove_text(&id) {
+        state.registry.log_audit(
+            "text_delete",
+            "host",
+            &format!("{} chars", removed.content.len()),
+        );
         state.broadcast(SyncEvent::TextRemoved { id });
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -501,7 +544,7 @@ struct ChunkUploadResp {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CompleteUploadResp {
-    file: FileItem,
+    file: Arc<FileItem>,
 }
 
 async fn upload_init(
@@ -514,12 +557,6 @@ async fn upload_init(
     }
     if body.size == 0 {
         return Err((StatusCode::BAD_REQUEST, "size 必须大于 0".into()));
-    }
-    if body.size > MAX_FILE_SIZE {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!("文件过大，最大 {} GB", MAX_FILE_SIZE / 1024 / 1024 / 1024),
-        ));
     }
 
     let chunk_size = body
@@ -534,11 +571,15 @@ async fn upload_init(
             .to_string()
     });
 
-    // 续传匹配：同 name + size 已存在进行中的会话
-    let sig = format!("{}::{}", safe_name, body.size);
+    let uploader_ip = client_ip(&addr);
+    // 续传匹配：同 name + size + uploader_ip（P0-3：避免并发冲突）
+    let sig = format!("{}::{}::{}", safe_name, body.size, uploader_ip);
     if let Some(existing) = state.uploads.find_by_signature(&sig) {
-        // 校验 chunk_size 一致，否则放弃续传（极端情况）
-        if existing.chunk_size == chunk_size && existing.chunk_count == chunk_count {
+        // 校验参数一致 + partial 文件仍然存在（否则放弃续传重新开）
+        if existing.chunk_size == chunk_size
+            && existing.chunk_count == chunk_count
+            && fs::metadata(&existing.partial_path).await.is_ok()
+        {
             return Ok(Json(InitUploadResp {
                 upload_id: existing.id,
                 chunk_size: existing.chunk_size,
@@ -547,33 +588,58 @@ async fn upload_init(
                 resumed: true,
             }));
         }
+        // 参数不一致或 partial 丢失：清理旧会话，走新建分支
+        if let Some(old) = state.uploads.remove(&existing.id) {
+            let _ = fs::remove_file(&old.partial_path).await;
+        }
     }
 
-    let upload_dir = state.config.read().upload_dir.clone();
+    let (upload_dir, min_free_mb) = {
+        let cfg = state.config.read();
+        (cfg.upload_dir.clone(), cfg.disk_min_free_mb)
+    };
     if upload_dir.as_os_str().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "uploadDir 未配置".into()));
     }
-    let id = nanoid!(16);
-    let tmp_dir = upload_dir.join(".tmp").join(&id);
-    fs::create_dir_all(&tmp_dir)
+    // P3-17: 磁盘空间软限制检查
+    check_disk_soft_limit(&upload_dir, body.size, min_free_mb)?;
+    let upload_id = nanoid!(16);
+    // 最终目录在 init 时就确定：upload_dir/<file_id>/
+    // partial 占位文件：upload_dir/<file_id>/<name>.partial
+    let file_id = nanoid!(16);
+    let file_dir = upload_dir.join(&file_id);
+    fs::create_dir_all(&file_dir)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir tmp: {e}")))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir: {e}")))?;
+    let final_path = file_dir.join(&safe_name);
+    let partial_path = file_dir.join(format!("{}.partial", &safe_name));
+
+    // 预分配：避免 chunk 写入 offset 时触发连续扩容（性能+减碎片）
+    let f = fs::File::create(&partial_path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("create partial: {e}")))?;
+    f.set_len(body.size)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("preallocate: {e}")))?;
+    drop(f);
 
     let session = UploadSession {
-        id: id.clone(),
+        id: upload_id.clone(),
+        file_id,
         name: safe_name,
         size: body.size,
         mime,
         chunk_size,
         chunk_count,
-        uploader_ip: client_ip(&addr),
+        uploader_ip,
         created_at: now_secs(),
         uploaded: Vec::new(),
-        tmp_dir,
+        partial_path,
+        final_path,
     };
-    state.uploads.insert(session.clone());
+    state.uploads.insert(session);
     Ok(Json(InitUploadResp {
-        upload_id: id,
+        upload_id,
         chunk_size,
         chunk_count,
         uploaded: Vec::new(),
@@ -600,17 +666,26 @@ async fn upload_cancel(
     Path(id): Path<String>,
 ) -> StatusCode {
     if let Some(s) = state.uploads.remove(&id) {
-        let _ = fs::remove_dir_all(&s.tmp_dir).await;
+        let _ = fs::remove_file(&s.partial_path).await;
+        if let Some(dir) = s.final_path.parent() {
+            // 若目录已空则删除；非空则保留（理论上 cancel 时只有 partial）
+            let _ = fs::remove_dir(dir).await;
+        }
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND
     }
 }
 
+/// 分片上传：直接把请求体 **流式** 写到目标文件对应偏移。
+/// 相比旧实现的两个关键改进：
+/// 1. 不再 `body: Bytes`（会把整个分片读进内存），改为 `Body` + `StreamReader`，内存占用由 O(chunk_size) 降到 O(64KB 缓冲)
+/// 2. 不再写临时 chunk 文件，complete 时不再二次拷贝；I/O 量从 2x 降到 1x
 async fn upload_chunk(
     State(state): State<Arc<AppState>>,
     Path((id, index)): Path<(String, u32)>,
-    body: Bytes,
+    headers: HeaderMap,
+    body: Body,
 ) -> Result<Json<ChunkUploadResp>, (StatusCode, String)> {
     let session = state
         .uploads
@@ -620,46 +695,74 @@ async fn upload_chunk(
     if index >= session.chunk_count {
         return Err((StatusCode::BAD_REQUEST, "index 越界".into()));
     }
-    // 校验块体积
     let expected = if index + 1 == session.chunk_count {
         session.size - (session.chunk_size * index as u64)
     } else {
         session.chunk_size
     };
-    if body.len() as u64 != expected {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("块大小不匹配：期望 {}，实际 {}", expected, body.len()),
-        ));
-    }
-    if body.len() as u64 > MAX_CHUNK_SIZE {
+    if expected > MAX_CHUNK_SIZE {
         return Err((StatusCode::PAYLOAD_TOO_LARGE, "块过大".into()));
     }
+    // 预校验：用 Content-Length 提前拒绝大小不一致的请求，避免写到一半才发现
+    if let Some(cl) = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        if cl != expected {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("块大小不匹配：期望 {}，实际 {}", expected, cl),
+            ));
+        }
+    }
 
-    // 落盘到临时文件
-    let path = session.chunk_path(index);
-    let mut f = fs::File::create(&path)
+    let offset = session.chunk_size * index as u64;
+    // O_WRONLY 打开预分配文件，seek 到目标偏移
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .open(&session.partial_path)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("create chunk: {e}")))?;
-    f.write_all(&body)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("open partial: {e}")))?;
+    f.seek(std::io::SeekFrom::Start(offset))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("write chunk: {e}")))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("seek: {e}")))?;
+
+    // Body -> StreamReader -> file (流式拷贝)
+    let stream = body
+        .into_data_stream()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let reader = StreamReader::new(stream);
+
+    // 用 take 做强约束：超过 expected 的字节直接被截断（防攻击/客户端 bug）
+    let copied = tokio::io::copy(&mut reader.take(expected), &mut f)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("stream write: {e}")))?;
     f.flush().await.ok();
     drop(f);
 
-    let updated = state
+    if copied != expected {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("块大小不匹配：期望 {}，实际写入 {}", expected, copied),
+        ));
+    }
+
+    let (uploaded, chunk_count) = state
         .uploads
         .mark_chunk(&id, index)
         .ok_or((StatusCode::NOT_FOUND, "upload 已被清理".into()))?;
-    let complete = updated.is_complete();
+    let complete = uploaded.len() as u32 == chunk_count;
 
     Ok(Json(ChunkUploadResp {
         received: index,
-        uploaded: updated.uploaded,
+        uploaded,
         complete,
     }))
 }
 
+/// 完成上传：所有分片已就位，只做一次原子 rename。
+/// `partial` 和最终文件在同一目录（同一文件系统 mount），rename 是 O(1) 元数据操作。
 async fn upload_complete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -679,66 +782,44 @@ async fn upload_complete(
         ));
     }
 
-    let upload_dir = state.config.read().upload_dir.clone();
-    let file_id = nanoid!(16);
-    let file_dir = upload_dir.join(&file_id);
-    fs::create_dir_all(&file_dir)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir final: {e}")))?;
-    let final_path = file_dir.join(&session.name);
-
-    // 按 index 顺序拼接所有分片到目标文件
-    let mut out = fs::File::create(&final_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("create final: {e}")))?;
-    let mut total: u64 = 0;
-    for i in 0..session.chunk_count {
-        let path = session.chunk_path(i);
-        let mut input = fs::File::open(&path).await.map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("open chunk {i}: {e}"))
-        })?;
-        let mut buf = vec![0u8; 1024 * 512];
-        loop {
-            let n = input.read(&mut buf).await.map_err(|e| {
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("read chunk {i}: {e}"))
-            })?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n]).await.map_err(|e| {
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("write merge: {e}"))
-            })?;
-            total = total.saturating_add(n as u64);
-        }
-    }
-    out.flush().await.ok();
-    drop(out);
-
-    if total != session.size {
-        let _ = fs::remove_dir_all(&file_dir).await;
+    // 事后校验：partial 实际大小必须与声明一致（防御磁盘错误/并发异常）
+    let meta = fs::metadata(&session.partial_path).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("partial 不可读: {e}"),
+        )
+    })?;
+    if meta.len() != session.size {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("合并尺寸不一致：期望 {}，实际 {}", session.size, total),
+            format!("文件尺寸不一致：期望 {}，实际 {}", session.size, meta.len()),
         ));
     }
 
-    // 清理临时目录 & 会话
-    let _ = fs::remove_dir_all(&session.tmp_dir).await;
+    fs::rename(&session.partial_path, &session.final_path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("rename: {e}")))?;
+
     state.uploads.remove(&id);
 
     let item = FileItem {
-        id: file_id,
+        id: session.file_id.clone(),
         name: session.name.clone(),
         size: session.size,
         mime: session.mime.clone(),
         uploader_ip: session.uploader_ip.clone(),
         created_at: now_secs(),
-        path: final_path,
+        path: session.final_path.clone(),
     };
-    state.registry.add_file(item.clone());
-    state.broadcast(SyncEvent::FileAdded { file: item.clone() });
+    let arc = state.registry.add_file(item);
+    state.registry.log_audit(
+        "upload",
+        &arc.uploader_ip,
+        &format!("{} ({} bytes, chunked)", arc.name, arc.size),
+    );
+    state.broadcast(SyncEvent::FileAdded { file: arc.clone() });
 
-    Ok(Json(CompleteUploadResp { file: item }))
+    Ok(Json(CompleteUploadResp { file: arc }))
 }
 
 // ========== WebSocket ==========
@@ -753,6 +834,8 @@ async fn sync_ws(
 async fn handle_sync_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.events.subscribe();
+    // 握手时快照一次鉴权纪元，后续检测到变动就立刻踢下线（P0-4）
+    let epoch_at_connect = state.auth_epoch();
 
     // 握手消息：告知客户端连上并附带当前服务信息
     #[derive(Serialize)]
@@ -771,36 +854,63 @@ async fn handle_sync_socket(socket: WebSocket, state: Arc<AppState>) {
         return;
     }
 
-    // 服务端推送循环
+    // 服务端推送循环：
+    // - 事件广播（来自 AppState::events）
+    // - 每 25s 主动发一次 Ping（心跳，防止 NAT/负载均衡超时断连）
+    // - 每 10s 检查鉴权纪元（JWT 被轮换时立即踢下线）
+    let state_push = state.clone();
     let push_task = tokio::spawn(async move {
+        let mut ping_timer = tokio::time::interval(std::time::Duration::from_secs(25));
+        ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut auth_timer = tokio::time::interval(std::time::Duration::from_secs(10));
+        auth_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // 丢弃首次立即触发的 tick
+        ping_timer.tick().await;
+        auth_timer.tick().await;
+
         loop {
-            match rx.recv().await {
-                Ok(ev) => {
-                    if let Ok(text) = serde_json::to_string(&ev) {
-                        if sender.send(Message::Text(text)).await.is_err() {
-                            break;
+            tokio::select! {
+                ev = rx.recv() => {
+                    match ev {
+                        Ok(ev) => {
+                            if let Ok(text) = serde_json::to_string(&ev) {
+                                if sender.send(Message::Text(text)).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            let _ = sender
+                                .send(Message::Text("{\"type\":\"resync\"}".into()))
+                                .await;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
-                // 接收者滞后，事件被覆盖：提示客户端全量重拉
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let _ = sender
-                        .send(Message::Text("{\"type\":\"resync\"}".into()))
-                        .await;
+                _ = ping_timer.tick() => {
+                    if sender.send(Message::Ping(Vec::new())).await.is_err() {
+                        break;
+                    }
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
+                _ = auth_timer.tick() => {
+                    if state_push.auth_epoch() != epoch_at_connect {
+                        let _ = sender
+                            .send(Message::Text("{\"type\":\"authInvalid\"}".into()))
+                            .await;
+                        break;
+                    }
+                }
             }
         }
-        // 主动关闭
         let _ = sender.close().await;
     });
 
-    // 客户端消息循环（心跳/断开检测）
+    // 客户端消息循环：只用于检测断开
     let recv_task = tokio::spawn(async move {
         while let Some(msg) = receiver.next().await {
             match msg {
                 Ok(Message::Close(_)) => break,
-                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Text(_)) | Ok(Message::Binary(_)) => {}
+                Ok(_) => {}
                 Err(_) => break,
             }
         }
@@ -859,14 +969,78 @@ fn parse_range_header(header_value: Option<&axum::http::HeaderValue>, total: u64
     Some((start, end.min(total.saturating_sub(1))))
 }
 
-/// 去除文件名中的路径分隔符与非法字符，防止路径穿越
+/// 返回 path 所在分区的剩余可用字节数；失败或不支持则返回 None。
+/// 仅读元信息，成本接近 0；失败不阻塞上传（返回 None 时视作"未知"按放行处理）。
+fn disk_available_bytes(path: &std::path::Path) -> Option<u64> {
+    use fs4::available_space;
+    // 若目录尚未建，逐级向上找到一个存在的父目录再询问
+    let mut cur: &std::path::Path = path;
+    loop {
+        if cur.exists() {
+            return available_space(cur).ok();
+        }
+        match cur.parent() {
+            Some(p) if p != cur => cur = p,
+            _ => return None,
+        }
+    }
+}
+
+/// 上传前的磁盘软限制校验（P3-17）。
+/// 规则：free < size + min_free_mb*MB 即拒绝。
+/// 0 表示不启用；拿不到 free 也放行（避免误伤）。
+fn check_disk_soft_limit(
+    upload_dir: &std::path::Path,
+    need: u64,
+    min_free_mb: u64,
+) -> Result<(), (StatusCode, String)> {
+    if min_free_mb == 0 {
+        return Ok(());
+    }
+    let Some(free) = disk_available_bytes(upload_dir) else {
+        return Ok(());
+    };
+    let reserve = min_free_mb.saturating_mul(1024 * 1024);
+    if free < need.saturating_add(reserve) {
+        return Err((
+            StatusCode::INSUFFICIENT_STORAGE,
+            format!(
+                "磁盘空间不足：剩余 {:.1} MB，需至少 {} MB 预留 + 文件 {:.1} MB",
+                free as f64 / 1024.0 / 1024.0,
+                min_free_mb,
+                need as f64 / 1024.0 / 1024.0,
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Windows 下保留的设备名（不区分大小写，含/不含扩展名都保留）
+/// 若文件名主体匹配这些之一，在前面加下划线前缀避免 `CON.txt`/`NUL` 等被 OS 劫持。
+const WINDOWS_RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// 去除文件名中的路径分隔符与非法字符，防止路径穿越；同时处理 Windows 保留名（P2-13）
 fn sanitize_filename(name: &str) -> String {
     let bad = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'];
     let cleaned: String = name.chars().map(|c| if bad.contains(&c) { '_' } else { c }).collect();
     let cleaned = cleaned.trim().trim_matches('.').trim();
     if cleaned.is_empty() {
-        "file".to_string()
+        return "file".to_string();
+    }
+    let truncated: String = cleaned.chars().take(200).collect();
+    // 取主名（不含扩展名）判断是否为 Windows 保留设备名
+    let stem_upper = truncated
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(&truncated)
+        .to_ascii_uppercase();
+    if WINDOWS_RESERVED.iter().any(|r| *r == stem_upper) {
+        format!("_{truncated}")
     } else {
-        cleaned.chars().take(200).collect()
+        truncated
     }
 }

@@ -3,21 +3,25 @@ use super::upload::UploadManager;
 use crate::config::AppConfig;
 use parking_lot::RwLock;
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// 实时同步事件，WS 推送给所有在线客户端
+/// 用 Arc 包裹 Item：每次 broadcast 与每个订阅者 clone 都只是 ref-count +1，
+/// 避免高并发/多 WS 连接时出现大量结构体深拷贝。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SyncEvent {
     #[serde(rename_all = "camelCase")]
-    FileAdded { file: FileItem },
+    FileAdded { file: Arc<FileItem> },
     #[serde(rename_all = "camelCase")]
     FileRemoved { id: String },
     #[serde(rename_all = "camelCase")]
-    TextAdded { text: TextItem },
+    TextAdded { text: Arc<TextItem> },
     #[serde(rename_all = "camelCase")]
     TextRemoved { id: String },
+    #[allow(dead_code)]
     Cleared,
 }
 
@@ -34,12 +38,17 @@ pub struct AppState {
     pub password_hash: RwLock<Option<String>>,
     /// 上次重算 hash 时的 (password_enabled, password) 明文快照，用于幂等判定
     last_auth_spec: RwLock<(bool, String)>,
+    /// 鉴权纪元号：每次 reload_auth 导致 JWT 轮换时 +1。
+    /// WS 连接握手时快照一份，检测到变动即主动断连，让客户端重新登录。
+    auth_epoch: AtomicU64,
 }
 
 impl AppState {
     /// 构造 AppState。`registry` 由调用方先打开（含 SQLite 持久化数据），这里仅持有。
     pub fn new(config: AppConfig, owner_token: String, registry: Arc<Registry>) -> Arc<Self> {
-        let (tx, _) = broadcast::channel::<SyncEvent>(128);
+        // 容量从 128 调到 1024：在 burst 场景（大量文件批量导入/网络抖动时累积）下
+        // 显著降低 Lagged 错误概率，避免 WS 全量 resync 风暴。
+        let (tx, _) = broadcast::channel::<SyncEvent>(1024);
         let jwt_secret = super::auth::random_secret();
         let last_spec = (config.password_enabled, config.password.clone());
         let password_hash = compute_password_hash(&config);
@@ -53,6 +62,7 @@ impl AppState {
             jwt_secret: RwLock::new(jwt_secret),
             password_hash: RwLock::new(password_hash),
             last_auth_spec: RwLock::new(last_spec),
+            auth_epoch: AtomicU64::new(0),
         })
     }
 
@@ -100,8 +110,14 @@ impl AppState {
         };
         *self.password_hash.write() = new_hash;
         *self.jwt_secret.write() = super::auth::random_secret();
+        self.auth_epoch.fetch_add(1, Ordering::Release);
         tracing::info!("auth reloaded: jwt secret rotated, passwordEnabled={new_enabled}");
         true
+    }
+
+    /// 当前鉴权纪元号快照（WS 用于检测 JWT 是否已被轮换）
+    pub fn auth_epoch(&self) -> u64 {
+        self.auth_epoch.load(Ordering::Acquire)
     }
 }
 

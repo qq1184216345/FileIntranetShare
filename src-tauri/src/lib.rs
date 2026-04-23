@@ -1,13 +1,13 @@
 mod commands;
-mod config;
+pub mod config;
 mod net;
-mod server;
+pub mod server;
 mod tray;
 
 use parking_lot::Mutex;
 use std::sync::Arc;
 use tauri::WindowEvent;
-use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 
 /// 全局托管的服务器状态（None 表示未启动）
 pub type ServerSlot = Arc<Mutex<Option<server::ServerHandle>>>;
@@ -28,7 +28,8 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
-            None,
+            // 开机启动时附加此参数；前端可据此判断并自动启动 HTTP 服务
+            Some(vec!["--flag-from-autostart"]),
         ))
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -41,6 +42,21 @@ pub fn run() {
             {
                 if let Err(e) = tray::build(app.handle()) {
                     tracing::warn!("build tray failed: {e}");
+                }
+            }
+
+            // 升级自愈：若 autostart 已启用但当前进程没收到我们约定的 flag，
+            // 说明注册表/plist 里是旧版写入的参数（可能没有 --flag-from-autostart）。
+            // 主动 disable->enable 一次，写入最新参数；下次开机才能精准识别。
+            let autolaunch = app.autolaunch();
+            let enabled = autolaunch.is_enabled().unwrap_or(false);
+            let has_flag = std::env::args().any(|a| a == "--flag-from-autostart");
+            if enabled && !has_flag {
+                let _ = autolaunch.disable();
+                if let Err(e) = autolaunch.enable() {
+                    tracing::warn!("refresh autostart args failed: {e}");
+                } else {
+                    tracing::info!("autostart args refreshed for next boot");
                 }
             }
             Ok(())
@@ -60,6 +76,7 @@ pub fn run() {
             commands::stop_server,
             commands::get_server_status,
             commands::set_auto_start,
+            commands::is_launched_by_autostart,
             commands::update_tray_status,
             commands::show_main_window,
             commands::quit_app,
@@ -67,6 +84,10 @@ pub fn run() {
             commands::share_clipboard,
             commands::share_local_files,
             commands::reveal_shared_file,
+            commands::cleanup_orphans,
+            commands::repair_firewall_rule,
+            commands::list_audit_logs,
+            commands::clear_audit_logs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

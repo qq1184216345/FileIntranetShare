@@ -1,6 +1,6 @@
 pub mod auth;
 pub mod files;
-mod firewall;
+pub mod firewall;
 mod routes;
 pub mod state;
 pub mod upload;
