@@ -12,7 +12,7 @@
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="FileShare-18888" dir=in action=allow protocol=TCP localport=18888 profile=any'
   Pop $0
   ${If} $0 != 0
-    DetailPrint "防火墙规则添加失败（可能需要管理员权限），FileShare 仍会正常运行；如需 LAN 访问，请在 FileShare 设置页点击"修复防火墙规则"。"
+    DetailPrint "防火墙规则添加失败（可能需要管理员权限），FileShare 仍会正常运行；如需 LAN 访问，请在 FileShare 设置页点击 [修复防火墙规则]。"
   ${EndIf}
 !macroend
 
