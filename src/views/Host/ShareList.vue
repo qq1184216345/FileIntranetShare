@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import {
   NButton,
   NCard,
@@ -34,133 +34,53 @@ import {
   revealSharedFile,
 } from "../../api/host";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { appendTokenToUrl } from "../../api/auth";
 import { copyToClipboard } from "../../utils/clipboard";
-import type { ShareFile, ShareText } from "../../types";
+import { useSync } from "../../composables/useSync";
+import { useShareList } from "../../composables/useShareList";
+import {
+  TEXT_SHARE_MAX_LEN,
+  deriveTxtFilename,
+  textToTxtFile,
+} from "../../utils/text-share";
+import { ChunkedUploader } from "../../api/chunk-upload";
+import type { ShareFile } from "../../types";
 
 const serverStore = useServerStore();
 const message = useMessage();
 const dialog = useDialog();
-
-const files = ref<ShareFile[]>([]);
-const texts = ref<ShareText[]>([]);
 
 function localBase() {
   // Host 端直接访问本地回环，避免 IP 切换时链接失效
   return `http://127.0.0.1:${serverStore.port}`;
 }
 
-function wsUrl() {
-  return appendTokenToUrl(`ws://127.0.0.1:${serverStore.port}/api/sync`);
-}
+// 列表状态 + 事件合并（unshift/splice 就地修改，O(1) id 查表）
+const { files, texts, refresh, applyEvent } = useShareList(() =>
+  fetchList(localBase()),
+);
 
-async function refresh() {
-  if (!serverStore.running) return;
-  try {
-    const data = await fetchList(localBase());
-    files.value = data.files;
-    texts.value = data.texts;
-  } catch (e) {
-    console.warn("list failed:", e);
-  }
-}
-
-// ========== WebSocket 实时同步（原生实现，URL 依赖动态端口） ==========
-
-let ws: WebSocket | null = null;
-let reconnectTimer: number | null = null;
-let manualClosed = false;
-
-function handleSyncEvent(ev: any) {
-  switch (ev?.type) {
-    case "hello":
-      refresh();
-      break;
-    case "fileAdded":
-      if (!files.value.some((f) => f.id === ev.file.id)) {
-        files.value = [ev.file, ...files.value];
-      }
-      break;
-    case "fileRemoved":
-      files.value = files.value.filter((f) => f.id !== ev.id);
-      break;
-    case "textAdded":
-      if (!texts.value.some((t) => t.id === ev.text.id)) {
-        texts.value = [ev.text, ...texts.value];
-      }
-      break;
-    case "textRemoved":
-      texts.value = texts.value.filter((t) => t.id !== ev.id);
-      break;
-    case "cleared":
-    case "resync":
-      refresh();
-      break;
-  }
-}
-
-function connectWs() {
-  if (ws || manualClosed || !serverStore.running) return;
-  try {
-    ws = new WebSocket(wsUrl());
-  } catch (e) {
-    console.warn("host ws construct failed:", e);
-    scheduleReconnect();
-    return;
-  }
-  ws.onopen = () => refresh();
-  ws.onmessage = (msg) => {
-    try {
-      handleSyncEvent(JSON.parse(msg.data));
-    } catch {}
-  };
-  ws.onclose = () => {
-    ws = null;
-    scheduleReconnect();
-  };
-  ws.onerror = () => {};
-}
-
-function scheduleReconnect() {
-  if (manualClosed || !serverStore.running || reconnectTimer) return;
-  reconnectTimer = window.setTimeout(() => {
-    reconnectTimer = null;
-    connectWs();
-  }, 2000);
-}
-
-function startSync() {
-  manualClosed = false;
-  connectWs();
-}
-
-function stopSync() {
-  manualClosed = true;
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  if (ws) {
-    try {
-      ws.close();
-    } catch {}
-    ws = null;
-  }
-}
-
-onMounted(() => {
-  if (serverStore.running) startSync();
+// WebSocket 实时同步（使用统一的 useSync composable：自动重连、心跳、authInvalid 处理）
+const sync = useSync({
+  url: `ws://127.0.0.1:${serverStore.port}/api/sync`,
+  autoConnect: false,
+  onEvent: applyEvent,
 });
 
-onUnmounted(stopSync);
+onMounted(() => {
+  if (serverStore.running) {
+    sync.start();
+    refresh();
+  }
+});
 
 watch(
   () => serverStore.running,
   (v) => {
     if (v) {
-      startSync();
+      sync.start();
+      refresh();
     } else {
-      stopSync();
+      sync.close();
       files.value = [];
       texts.value = [];
     }
@@ -172,7 +92,7 @@ watch(
 function confirmClear() {
   dialog.warning({
     title: "确认清空",
-    content: "将删除所有已分享的文件和文本，文件将从磁盘移除，不可恢复。",
+    content: "将清空所有已分享的文件和文本记录，源文件保留在磁盘上不会删除。",
     positiveText: "清空",
     negativeText: "取消",
     onPositiveClick: async () => {
@@ -244,13 +164,47 @@ const textDraft = ref("");
 const textSubmitting = ref(false);
 
 async function submitText() {
-  if (!textDraft.value.trim()) return;
+  const content = textDraft.value;
+  if (!content.trim()) return;
+
+  // 超长文本转为 .txt 文件上传，避免列表项难看 + 方便保存
+  if (content.length > TEXT_SHARE_MAX_LEN) {
+    const filename = deriveTxtFilename(content);
+    dialog.info({
+      title: "文本较长",
+      content: `当前文本 ${content.length} 字，超过 ${TEXT_SHARE_MAX_LEN} 字阈值。将自动转换为 “${filename}” 上传。是否继续？`,
+      positiveText: "转 TXT 上传",
+      negativeText: "取消",
+      onPositiveClick: async () => {
+        await uploadTextAsFile(content);
+      },
+    });
+    return;
+  }
+
   textSubmitting.value = true;
   try {
-    await postText(textDraft.value, localBase());
+    await postText(content, localBase());
     textDraft.value = "";
     showTextModal.value = false;
     message.success("已分享");
+  } catch (e: any) {
+    message.error(String(e?.message ?? e));
+  } finally {
+    textSubmitting.value = false;
+  }
+}
+
+/** 把文本包装成 File，走分片上传 */
+async function uploadTextAsFile(content: string) {
+  textSubmitting.value = true;
+  try {
+    const file = textToTxtFile(content);
+    const uploader = new ChunkedUploader(file, { base: localBase() });
+    await uploader.start();
+    textDraft.value = "";
+    showTextModal.value = false;
+    message.success(`已转为 ${file.name} 上传`);
   } catch (e: any) {
     message.error(String(e?.message ?? e));
   } finally {
@@ -327,43 +281,15 @@ async function handleShareClipboard() {
   }
 }
 
-// ========== 派生：统一的列表项 ==========
+// ========== 派生：分组列表 ==========
 
-interface RowBase {
-  kind: "file" | "text";
-  id: string;
-  ip: string;
-  primary: string;
-  secondary: string;
-  createdAt: number;
-}
-
-const rows = computed<RowBase[]>(() => {
-  const fileRows: RowBase[] = files.value.map((f) => ({
-    kind: "file",
-    id: f.id,
-    ip: f.uploaderIp,
-    primary: f.name,
-    secondary: `${formatSize(f.size)} · ${formatTime(f.createdAt)}`,
-    createdAt: f.createdAt,
-  }));
-  const textRows: RowBase[] = texts.value.map((t) => ({
-    kind: "text",
-    id: t.id,
-    ip: t.uploaderIp,
-    primary: t.content.slice(0, 60) + (t.content.length > 60 ? "..." : ""),
-    secondary: `文本 · ${formatTime(t.createdAt)}`,
-    createdAt: t.createdAt,
-  }));
-  return [...fileRows, ...textRows].sort((a, b) => b.createdAt - a.createdAt);
-});
-
-function textContent(id: string) {
-  return texts.value.find((t) => t.id === id)?.content ?? "";
-}
-function fileItem(id: string) {
-  return files.value.find((f) => f.id === id);
-}
+const sortedFiles = computed(() =>
+  [...files.value].sort((a, b) => b.createdAt - a.createdAt),
+);
+const sortedTexts = computed(() =>
+  [...texts.value].sort((a, b) => b.createdAt - a.createdAt),
+);
+const totalCount = computed(() => files.value.length + texts.value.length);
 </script>
 
 <template>
@@ -403,7 +329,7 @@ function fileItem(id: string) {
         </NButton>
         <NButton
           size="small"
-          :disabled="rows.length === 0"
+          :disabled="totalCount === 0"
           @click="confirmClear"
         >
           <template #icon>
@@ -414,73 +340,117 @@ function fileItem(id: string) {
       </NSpace>
     </div>
 
-    <div v-if="rows.length === 0" class="empty-wrap">
+    <!-- 显式拖拽/点选区：居中大块，视觉与 Guest 端保持一致 -->
+    <div
+      class="local-dropzone"
+      :class="{ disabled: !serverStore.running || pickingLocal }"
+      :title="serverStore.running ? '点击从本机选择文件（或拖拽到窗口任意位置）' : '请先启动服务'"
+      @click="handlePickLocal"
+    >
+      <NIcon :size="40" class="ld-icon"><CloudUploadOutline /></NIcon>
+      <div class="ld-title">拖拽文件到此或点击选择</div>
+      <div class="ld-sub">支持多文件，单文件不限大小</div>
+    </div>
+
+    <div v-if="totalCount === 0" class="empty-wrap">
       <NEmpty>
         <template #default>
           <div class="empty-title">暂无分享内容</div>
           <div class="empty-sub">
-            拖拽文件到窗口、点击「本机文件」，或等待局域网用户上传
+            点击上方区域选择文件，或等待局域网用户上传
           </div>
         </template>
       </NEmpty>
     </div>
 
-    <div v-else class="items">
-      <div v-for="r in rows" :key="r.kind + '-' + r.id" class="row">
-        <div class="col-ip" :title="r.ip">{{ r.ip }}</div>
-        <div class="col-name" :title="r.primary">{{ r.primary }}</div>
-        <div class="col-meta">{{ r.secondary }}</div>
-        <div class="col-actions">
-          <NButton
-            v-if="r.kind === 'file'"
-            size="small"
-            quaternary
-            circle
-            title="复制下载链接"
-            @click="copyDownloadLink(r.id)"
-          >
-            <template #icon>
-              <NIcon><LinkOutline /></NIcon>
-            </template>
-          </NButton>
-          <NButton
-            v-if="r.kind === 'text'"
-            size="small"
-            quaternary
-            circle
-            title="复制文本"
-            @click="copyText(textContent(r.id))"
-          >
-            <template #icon>
-              <NIcon><CopyOutline /></NIcon>
-            </template>
-          </NButton>
-          <NButton
-            v-if="r.kind === 'file' && fileItem(r.id)"
-            size="small"
-            quaternary
-            circle
-            title="打开所在文件夹"
-            @click="openFolder(fileItem(r.id)!)"
-          >
-            <template #icon>
-              <NIcon><FolderOpenOutline /></NIcon>
-            </template>
-          </NButton>
-          <NButton
-            size="small"
-            quaternary
-            circle
-            title="删除"
-            @click="r.kind === 'file' ? removeFile(r.id) : removeText(r.id)"
-          >
-            <template #icon>
-              <NIcon><TrashOutline /></NIcon>
-            </template>
-          </NButton>
+    <template v-else>
+      <!-- 文件 -->
+      <section class="section">
+        <div class="section-title">文件 ({{ sortedFiles.length }})</div>
+        <div v-if="sortedFiles.length === 0" class="sub-empty">暂无文件</div>
+        <div v-else class="items">
+          <div v-for="f in sortedFiles" :key="'f-' + f.id" class="row">
+            <div class="col-ip" :title="f.uploaderIp">{{ f.uploaderIp }}</div>
+            <div class="col-name" :title="f.name">{{ f.name }}</div>
+            <div class="col-meta">
+              {{ formatSize(f.size) }} · {{ formatTime(f.createdAt) }}
+            </div>
+            <div class="col-actions">
+              <NButton
+                size="small"
+                quaternary
+                circle
+                title="复制下载链接"
+                @click="copyDownloadLink(f.id)"
+              >
+                <template #icon>
+                  <NIcon><LinkOutline /></NIcon>
+                </template>
+              </NButton>
+              <NButton
+                size="small"
+                quaternary
+                circle
+                title="打开所在文件夹"
+                @click="openFolder(f)"
+              >
+                <template #icon>
+                  <NIcon><FolderOpenOutline /></NIcon>
+                </template>
+              </NButton>
+              <NButton
+                size="small"
+                quaternary
+                circle
+                title="删除"
+                @click="removeFile(f.id)"
+              >
+                <template #icon>
+                  <NIcon><TrashOutline /></NIcon>
+                </template>
+              </NButton>
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
+      </section>
+
+      <!-- 文本 -->
+      <section class="section">
+        <div class="section-title">文本 ({{ sortedTexts.length }})</div>
+        <div v-if="sortedTexts.length === 0" class="sub-empty">暂无文本</div>
+        <div v-else class="items">
+          <div v-for="t in sortedTexts" :key="'t-' + t.id" class="row row-text">
+            <div class="col-ip" :title="t.uploaderIp">{{ t.uploaderIp }}</div>
+            <div class="col-name col-name-text" :title="t.content">{{ t.content }}</div>
+            <div class="col-meta">{{ formatTime(t.createdAt) }}</div>
+            <div class="col-actions">
+              <NButton
+                size="small"
+                quaternary
+                circle
+                title="复制文本"
+                @click="copyText(t.content)"
+              >
+                <template #icon>
+                  <NIcon><CopyOutline /></NIcon>
+                </template>
+              </NButton>
+              <NButton
+                size="small"
+                quaternary
+                circle
+                title="删除"
+                @click="removeText(t.id)"
+              >
+                <template #icon>
+                  <NIcon><TrashOutline /></NIcon>
+                </template>
+              </NButton>
+            </div>
+          </div>
+        </div>
+      </section>
+    </template>
 
     <!-- 分享文本弹窗 -->
     <NModal
@@ -495,6 +465,15 @@ function fileItem(id: string) {
         :autosize="{ minRows: 4, maxRows: 10 }"
         placeholder="输入要分享到局域网的文本..."
       />
+      <div
+        class="text-count"
+        :class="{ 'is-over': textDraft.length > TEXT_SHARE_MAX_LEN }"
+      >
+        {{ textDraft.length }} / {{ TEXT_SHARE_MAX_LEN }} 字
+        <span v-if="textDraft.length > TEXT_SHARE_MAX_LEN">
+          · 超长将转为 .txt 文件上传
+        </span>
+      </div>
       <template #footer>
         <NSpace justify="end">
           <NButton @click="showTextModal = false">取消</NButton>
@@ -525,8 +504,64 @@ function fileItem(id: string) {
 .title {
   font-weight: 500;
 }
+.local-dropzone {
+  border: 2px dashed #a5f3fc;
+  border-radius: 16px;
+  padding: 36px 20px;
+  background: var(--fs-card-bg-translucent, rgba(255, 255, 255, 0.6));
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-bottom: 12px;
+  user-select: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.local-dropzone:hover {
+  border-color: var(--fs-accent-cyan, #22d3ee);
+  background: var(--fs-card-bg-elevated, rgba(255, 255, 255, 0.85));
+}
+.local-dropzone.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.ld-icon {
+  color: var(--fs-accent-cyan-text, #0891b2);
+}
+.ld-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--fs-card-title);
+}
+.ld-sub {
+  font-size: 12px;
+  color: var(--fs-card-text);
+}
+
 .empty-wrap {
   padding: 24px 0;
+}
+.section {
+  margin-top: 8px;
+}
+.section + .section {
+  margin-top: 16px;
+}
+.section-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fs-text-secondary);
+  padding: 4px 2px 8px;
+  border-bottom: 1px solid var(--fs-border-soft, rgba(0, 0, 0, 0.06));
+  margin-bottom: 6px;
+}
+.sub-empty {
+  padding: 12px 6px;
+  color: var(--fs-text-tertiary);
+  font-size: 12px;
 }
 .empty-title {
   font-size: 14px;
@@ -566,6 +601,20 @@ function fileItem(id: string) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.row-text {
+  align-items: flex-start;
+}
+.col-name-text {
+  /* 文本预览：最多 6 行，保留换行，超出省略 */
+  white-space: pre-wrap;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  line-clamp: 6;
+  line-height: 1.5;
+  overflow: hidden;
+}
 .col-meta {
   color: var(--fs-text-tertiary);
   font-size: 12px;
@@ -577,5 +626,14 @@ function fileItem(id: string) {
 .col-actions {
   display: flex;
   gap: 4px;
+}
+.text-count {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--fs-text-tertiary);
+  text-align: right;
+}
+.text-count.is-over {
+  color: #e08b28;
 }
 </style>

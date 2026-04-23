@@ -1,6 +1,6 @@
 import { onUnmounted, ref } from "vue";
 import type { ShareFile, ShareText } from "../types";
-import { appendTokenToUrl, authedFetch } from "../api/auth";
+import { appendTokenToUrl, authedFetch, clearToken, dispatchAuthExpired } from "../api/auth";
 
 export type SyncEvent =
   | { type: "hello"; startedAt: number }
@@ -9,7 +9,8 @@ export type SyncEvent =
   | { type: "fileRemoved"; id: string }
   | { type: "textAdded"; text: ShareText }
   | { type: "textRemoved"; id: string }
-  | { type: "cleared" };
+  | { type: "cleared" }
+  | { type: "authInvalid" };
 
 export interface UseSyncOptions {
   /** WebSocket URL；默认基于当前页面 (ws(s)://host/api/sync) */
@@ -70,6 +71,14 @@ export function useSync(options: UseSyncOptions) {
       try {
         const ev = JSON.parse(msg.data as string) as SyncEvent;
         if (ev.type === "hello") startedAt.value = ev.startedAt;
+        // 服务端 JWT 已轮换：立刻清 token、回登录页（配合后端 P0-4）
+        if (ev.type === "authInvalid") {
+          manualClosed = true;
+          clearToken();
+          dispatchAuthExpired();
+          try { socket.close(); } catch {}
+          return;
+        }
         onEvent(ev);
       } catch (e) {
         console.warn("[sync] parse error:", e);
@@ -81,10 +90,9 @@ export function useSync(options: UseSyncOptions) {
     socket.onclose = () => {
       connected.value = false;
       if (ws === socket) ws = null;
-      // 探测是否因鉴权失效导致断开：authedFetch 遇 401 会自动清 token 并发 AUTH_EVENT
-      authedFetch("/api/list", { cache: "no-store" }).catch(() => {
-        // 忽略网络错误；401 已被 authedFetch 处理
-      });
+      if (manualClosed) return;
+      // 断开兜底：发一次 /api/list 探测 401（若服务端重启丢了旧 token 也能感知）
+      authedFetch("/api/list", { cache: "no-store" }).catch(() => {});
       scheduleReconnect();
     };
   }

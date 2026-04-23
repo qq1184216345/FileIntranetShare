@@ -5,8 +5,11 @@ import {
   NEmpty,
   NIcon,
   NInput,
+  NModal,
   NProgress,
+  NSpace,
   NSpin,
+  useDialog,
   useMessage,
 } from "naive-ui";
 import {
@@ -24,6 +27,8 @@ import {
   CloseOutline,
   PauseOutline,
   PlayOutline,
+  ChatboxEllipsesOutline,
+  LinkOutline,
 } from "@vicons/ionicons5";
 import {
   downloadUrl,
@@ -34,8 +39,14 @@ import {
 import { ChunkedUploader, type ChunkedStatus } from "../../api/chunk-upload";
 import { formatSize, formatTime, fileKind } from "../../utils/format";
 import { copyToClipboard } from "../../utils/clipboard";
+import {
+  TEXT_SHARE_MAX_LEN,
+  deriveTxtFilename,
+  textToTxtFile,
+} from "../../utils/text-share";
 import { useSync } from "../../composables/useSync";
-import type { ShareFile, ShareText } from "../../types";
+import { useShareList } from "../../composables/useShareList";
+import type { ShareFile } from "../../types";
 
 interface UploadTask {
   id: string;
@@ -49,26 +60,20 @@ interface UploadTask {
 }
 
 const message = useMessage();
+const dialog = useDialog();
 
 const loading = ref(true);
-const files = ref<ShareFile[]>([]);
-const texts = ref<ShareText[]>([]);
-const maxUploadSize = ref(100 * 1024 * 1024);
+// 0 表示后端不做单文件大小限制；>0 时前端兜底拦截
+const maxUploadSize = ref(0);
 
 const textDraft = ref("");
 const textSubmitting = ref(false);
+const showTextModal = ref(false);
 const tasks = reactive<UploadTask[]>([]);
 const uploaders = new Map<string, ChunkedUploader>();
 
-async function refresh() {
-  try {
-    const { files: f, texts: t } = await fetchList();
-    files.value = f;
-    texts.value = t;
-  } catch (e) {
-    console.warn("list failed:", e);
-  }
-}
+// 列表状态 + 事件合并（共享 Host 侧的 composable，O(1) 查表 + 就地 unshift）
+const { files, texts, refresh, applyEvent } = useShareList(() => fetchList());
 
 onMounted(async () => {
   try {
@@ -80,32 +85,7 @@ onMounted(async () => {
 });
 
 // WebSocket 实时同步：增量 patch 本地列表
-useSync({
-  onEvent: (ev) => {
-    switch (ev.type) {
-      case "fileAdded":
-        if (!files.value.some((f) => f.id === ev.file.id)) {
-          files.value = [ev.file, ...files.value];
-        }
-        break;
-      case "fileRemoved":
-        files.value = files.value.filter((f) => f.id !== ev.id);
-        break;
-      case "textAdded":
-        if (!texts.value.some((t) => t.id === ev.text.id)) {
-          texts.value = [ev.text, ...texts.value];
-        }
-        break;
-      case "textRemoved":
-        texts.value = texts.value.filter((t) => t.id !== ev.id);
-        break;
-      case "cleared":
-      case "resync":
-        refresh();
-        break;
-    }
-  },
-});
+useSync({ onEvent: applyEvent });
 
 // ========== 文件上传 ==========
 
@@ -136,11 +116,12 @@ let taskCounter = 0;
 
 function handleFiles(list: File[]) {
   for (const file of list) {
+    // 浏览器把文件夹放入 FileList 时 size 会为 0；空文件也命中这里
     if (file.size === 0) {
-      message.error(`${file.name} 是空文件，已跳过`);
+      message.error(`${file.name} 不支持（空文件或文件夹）`);
       continue;
     }
-    if (file.size > maxUploadSize.value) {
+    if (maxUploadSize.value > 0 && file.size > maxUploadSize.value) {
       message.error(
         `${file.name} 超过单文件 ${formatSize(maxUploadSize.value)} 上限`,
       );
@@ -221,12 +202,47 @@ function removeTask(task: UploadTask) {
 // ========== 文本分享 ==========
 
 async function submitText() {
-  if (!textDraft.value.trim()) return;
+  const content = textDraft.value;
+  if (!content.trim()) return;
+
+  // 超长文本：弹窗确认后转为 .txt 文件上传
+  if (content.length > TEXT_SHARE_MAX_LEN) {
+    const filename = deriveTxtFilename(content);
+    dialog.info({
+      title: "文本较长",
+      content: `当前文本 ${content.length} 字，超过 ${TEXT_SHARE_MAX_LEN} 字阈值。将自动转换为 “${filename}” 上传。是否继续？`,
+      positiveText: "转 TXT 上传",
+      negativeText: "取消",
+      onPositiveClick: async () => {
+        await uploadTextAsFile(content);
+      },
+    });
+    return;
+  }
+
   textSubmitting.value = true;
   try {
-    await postText(textDraft.value);
+    await postText(content);
     textDraft.value = "";
+    showTextModal.value = false;
     message.success("文本已分享");
+    await refresh();
+  } catch (e: any) {
+    message.error(String(e?.message ?? e));
+  } finally {
+    textSubmitting.value = false;
+  }
+}
+
+async function uploadTextAsFile(content: string) {
+  textSubmitting.value = true;
+  try {
+    const file = textToTxtFile(content);
+    const uploader = new ChunkedUploader(file);
+    await uploader.start();
+    textDraft.value = "";
+    showTextModal.value = false;
+    message.success(`已转为 ${file.name} 上传`);
     await refresh();
   } catch (e: any) {
     message.error(String(e?.message ?? e));
@@ -258,6 +274,17 @@ function iconFor(name: string, mime: string) {
 
 function download(file: ShareFile) {
   window.location.href = downloadUrl(file.id);
+}
+
+async function copyDownloadLink(file: ShareFile) {
+  // downloadUrl 已经是完整 URL（含 host、可选的 token），可直接分享给其他局域网成员
+  const url = downloadUrl(file.id);
+  const ok = await copyToClipboard(url);
+  if (ok) {
+    message.success("下载链接已复制");
+  } else {
+    message.error("复制失败，请长按手动复制");
+  }
 }
 </script>
 
@@ -293,7 +320,12 @@ function download(file: ShareFile) {
         </NIcon>
         <div class="dropzone-title">拖拽文件到此或点击选择</div>
         <div class="dropzone-sub">
-          单文件最大 {{ formatSize(maxUploadSize) }}，支持多文件
+          <template v-if="maxUploadSize > 0">
+            单文件最大 {{ formatSize(maxUploadSize) }}，支持多文件
+          </template>
+          <template v-else>
+            支持多文件，单文件不限大小
+          </template>
         </div>
         <input
           ref="fileInput"
@@ -377,25 +409,14 @@ function download(file: ShareFile) {
         </div>
       </section>
 
-      <!-- 分享文本 -->
+      <!-- 分享文本（按钮 → 弹窗，与 Host 端统一） -->
       <section class="section">
-        <div class="section-title">分享文本</div>
-        <div class="text-compose">
-          <NInput
-            v-model:value="textDraft"
-            type="textarea"
-            :autosize="{ minRows: 2, maxRows: 5 }"
-            placeholder="输入要分享的文本..."
-          />
-          <NButton
-            type="primary"
-            :loading="textSubmitting"
-            :disabled="!textDraft.trim()"
-            @click="submitText"
-          >
-            发送
-          </NButton>
-        </div>
+        <NButton block size="large" @click="showTextModal = true">
+          <template #icon>
+            <NIcon><ChatboxEllipsesOutline /></NIcon>
+          </template>
+          分享文本
+        </NButton>
       </section>
 
       <!-- 文本列表 -->
@@ -447,6 +468,17 @@ function download(file: ShareFile) {
               circle
               quaternary
               size="small"
+              @click.stop="copyDownloadLink(f)"
+              title="复制下载链接"
+            >
+              <template #icon>
+                <NIcon><LinkOutline /></NIcon>
+              </template>
+            </NButton>
+            <NButton
+              circle
+              quaternary
+              size="small"
               @click.stop="download(f)"
               title="下载"
             >
@@ -462,16 +494,56 @@ function download(file: ShareFile) {
     <footer class="footer">
       <span>FileShare · 仅限局域网使用</span>
     </footer>
+
+    <!-- 文本分享弹窗 -->
+    <NModal
+      v-model:show="showTextModal"
+      preset="card"
+      title="分享文本"
+      style="width: min(520px, 94vw)"
+    >
+      <NInput
+        v-model:value="textDraft"
+        type="textarea"
+        :autosize="{ minRows: 4, maxRows: 10 }"
+        placeholder="输入要分享到局域网的文本..."
+      />
+      <div
+        class="text-count"
+        :class="{ 'is-over': textDraft.length > TEXT_SHARE_MAX_LEN }"
+      >
+        {{ textDraft.length }} / {{ TEXT_SHARE_MAX_LEN }} 字
+        <span v-if="textDraft.length > TEXT_SHARE_MAX_LEN">
+          · 超长将转为 .txt 文件上传
+        </span>
+      </div>
+      <template #footer>
+        <NSpace justify="end">
+          <NButton @click="showTextModal = false">取消</NButton>
+          <NButton
+            type="primary"
+            :loading="textSubmitting"
+            :disabled="!textDraft.trim()"
+            @click="submitText"
+          >
+            发送
+          </NButton>
+        </NSpace>
+      </template>
+    </NModal>
   </div>
 </template>
 
 <style scoped>
 .guest-root {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   background: var(--fs-guest-bg);
   color: var(--fs-card-title);
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   transition: background 0.25s ease;
 }
 
@@ -623,16 +695,7 @@ function download(file: ShareFile) {
   line-height: 1.4;
 }
 
-/* 文本 */
-.text-compose {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-}
-.text-compose :deep(.n-input) {
-  flex: 1;
-}
-
+/* 文本列表 */
 .text-list {
   display: flex;
   flex-direction: column;
@@ -650,6 +713,12 @@ function download(file: ShareFile) {
   word-break: break-all;
   color: var(--fs-card-title);
   line-height: 1.5;
+  /* 最多展示 6 行，超出省略，避免长文本撑大列表项 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  line-clamp: 6;
+  overflow: hidden;
 }
 .text-meta {
   display: flex;
@@ -712,6 +781,16 @@ function download(file: ShareFile) {
   padding: 24px 0;
 }
 
+.text-count {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--fs-card-muted);
+  text-align: right;
+}
+.text-count.is-over {
+  color: #e08b28;
+}
+
 .footer {
   text-align: center;
   color: var(--fs-card-muted);
@@ -726,12 +805,6 @@ function download(file: ShareFile) {
   }
   .dropzone {
     padding: 24px 16px;
-  }
-  .text-compose {
-    flex-direction: column;
-  }
-  .text-compose :deep(.n-button) {
-    align-self: flex-end;
   }
 }
 </style>

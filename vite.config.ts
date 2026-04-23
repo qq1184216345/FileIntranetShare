@@ -29,4 +29,22 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+
+  build: {
+    // 单 chunk 告警阈值调整到 1MB（我们分包后最大约 700KB）
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      output: {
+        // 拆成稳定可缓存的几个 chunk，避免 Guest 首屏拉单个大 bundle
+        // vendor-ui：naive-ui + icons（最大头），单独缓存 1 次够用
+        // vendor-vue：vue 运行时 + router + pinia，升级频率低
+        // tauri：@tauri-apps/*，只在 Host 端用到；Guest 通过 tree-shaking 应被剔除
+        manualChunks: {
+          "vendor-ui": ["naive-ui", "@vicons/ionicons5"],
+          "vendor-vue": ["vue", "vue-router", "pinia", "@vueuse/core"],
+          "vendor-qrcode": ["qrcode"],
+        },
+      },
+    },
+  },
 }));
