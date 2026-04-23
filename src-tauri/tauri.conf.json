@@ -49,7 +49,8 @@
         "languages": ["SimpChinese", "English"],
         "displayLanguageSelector": false,
         "compression": "lzma",
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "./installer.nsh"
       }
     }
   },
