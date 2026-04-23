@@ -78,12 +78,12 @@ pnpm tauri:build
 src-tauri/target/release/bundle/nsis/FileShare_0.1.2_x64-setup.exe
 ```
 
-实测体积（0.1.2 release + LTO + strip）：
+实测体积（0.1.3 release + LTO + strip）：
 
 | 产物 | 大小 |
 |---|---|
-| `fileshare.exe`（解压后可执行文件） | **7.10 MB** |
-| `FileShare_0.1.2_x64-setup.exe`（NSIS 安装包） | **2.79 MB** |
+| `fileshare.exe`（解压后可执行文件） | ~7 MB |
+| `FileShare_0.1.3_x64-setup.exe`（NSIS 安装包） | ~2.8 MB |
 
 | 项 | 说明 |
 |---|---|
@@ -125,6 +125,49 @@ pnpm tauri build --bundles msi
 ```
 
 需要额外下载 WiX Toolset（Tauri CLI 首次会自动处理，同样受 GitHub 网络影响，可用同一个镜像环境变量解决）。
+
+### macOS 打包（Universal DMG）
+
+必须在 **macOS 机器**上执行（Windows 交叉编译 Darwin 需整套 osxcross，不划算）。
+
+仓库内已附一键脚本：
+
+```bash
+# 在 macOS 上
+bash scripts/build-macos.sh
+```
+
+脚本做了这些事：
+
+1. 校验 `cargo` / `pnpm` / `node` / `xcode-select`
+2. `rustup target add aarch64-apple-darwin x86_64-apple-darwin`
+3. `pnpm install --frozen-lockfile`
+4. `pnpm tauri build --target universal-apple-darwin`（同时烘 Intel + Apple Silicon 两份二进制用 `lipo` 合并）
+
+产物位置：
+
+```
+src-tauri/target/universal-apple-darwin/release/bundle/
+├─ macos/FileShare.app
+└─ dmg/FileShare_<ver>_universal.dmg
+```
+
+`tauri.conf.json > bundle.macOS` 已配置：
+
+| 项 | 值 |
+|---|---|
+| `minimumSystemVersion` | `11.0`（Big Sur，覆盖目前所有主流 Mac） |
+| DMG 窗口 | 660 × 400，应用图标左、应用程序文件夹右（拖拽安装一目了然） |
+
+已知坑：
+
+- **沙箱环境下 hdiutil 创建 DMG 会被拦**（CI + macOS sandbox 组合遇到过），本地终端直接跑不会触发
+- 若未加 GitHub 镜像，`dmg-license` 等打包助手下载可能超时：
+  ```bash
+  export TAURI_BUNDLER_TOOLS_GITHUB_MIRROR="https://ghfast.top/https://github.com"
+  bash scripts/build-macos.sh
+  ```
+- 未签名 DMG 在终端用户首次打开时会被 Gatekeeper 拦截，需右键「打开 → 打开」一次性放行，或在「系统设置 → 隐私与安全性」里点「仍要打开」
 
 ### 代码签名（可选，未启用）
 
