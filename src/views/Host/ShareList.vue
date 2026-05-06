@@ -27,6 +27,7 @@ import {
   deleteFile,
   deleteText,
   postText,
+  downloadUrl,
 } from "../../api/guest";
 import {
   shareClipboard,
@@ -129,7 +130,7 @@ async function removeText(id: string) {
 // ========== 辅助操作 ==========
 
 async function copyDownloadLink(id: string) {
-  const url = `${serverStore.url}/api/file/${encodeURIComponent(id)}`;
+  const url = downloadUrl(id, serverStore.url);
   const ok = await copyToClipboard(url);
   if (ok) {
     message.success("下载链接已复制");

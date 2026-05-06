@@ -4,6 +4,8 @@ import { baseUrl } from "./guest";
 
 /** 默认分片 4MB，与后端 DEFAULT_CHUNK_SIZE 对齐 */
 const DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
+/** 并发分片数：4 个同时在途，充分利用局域网带宽 */
+const UPLOAD_CONCURRENCY = 4;
 
 interface InitResp {
   uploadId: string;
@@ -51,7 +53,10 @@ export class ChunkedUploader {
   error?: string;
 
   private aborter?: AbortController;
-  private currentXhr?: XMLHttpRequest;
+  /** 并发中所有活跃的 XHR，pause/cancel 时一次性全部 abort */
+  private activeXhrs = new Set<XMLHttpRequest>();
+  /** 各分片当前已传字节数，用于实时进度聚合 */
+  private chunkProgress = new Map<number, number>();
   /** 最终合并后的服务端文件元数据 */
   private finalItem?: ShareFile;
 
@@ -62,15 +67,16 @@ export class ChunkedUploader {
     this.chunkSize = opts.chunkSize || DEFAULT_CHUNK_SIZE;
   }
 
-  /** 当前已完成字节数（用于进度显示） */
+  /** 当前已完成字节数 + 各并发分片在途字节数（用于进度显示） */
   loaded(): number {
     let bytes = 0;
     for (const i of this.uploaded) {
-      if (i + 1 === this.chunkCount) {
-        bytes += this.file.size - this.chunkSize * i;
-      } else {
-        bytes += this.chunkSize;
-      }
+      bytes += i + 1 === this.chunkCount
+        ? this.file.size - this.chunkSize * i
+        : this.chunkSize;
+    }
+    for (const b of this.chunkProgress.values()) {
+      bytes += b;
     }
     return bytes;
   }
@@ -112,11 +118,13 @@ export class ChunkedUploader {
     }
   }
 
-  /** 暂停：中断当前块上传；保留 uploadId 以便续传 */
+  /** 暂停：中断所有在途分片；保留 uploadId 以便续传 */
   pause() {
     if (this.status === "uploading") {
       this.setStatus("paused");
-      this.currentXhr?.abort();
+      for (const xhr of this.activeXhrs) xhr.abort();
+      this.activeXhrs.clear();
+      this.chunkProgress.clear();
       this.aborter?.abort();
     }
   }
@@ -124,7 +132,9 @@ export class ChunkedUploader {
   /** 取消：中断并通知服务端清理 */
   async cancel() {
     this.setStatus("cancelled");
-    this.currentXhr?.abort();
+    for (const xhr of this.activeXhrs) xhr.abort();
+    this.activeXhrs.clear();
+    this.chunkProgress.clear();
     this.aborter?.abort();
     if (this.uploadId) {
       try {
@@ -189,26 +199,38 @@ export class ChunkedUploader {
   }
 
   private async uploadLoop() {
-    for (let i = 0; i < this.chunkCount; i++) {
-      if (this.uploaded.has(i)) continue;
-      if ((this.status as ChunkedStatus) === "paused" || (this.status as ChunkedStatus) === "cancelled") {
-        return;
+    const pending = Array.from({ length: this.chunkCount }, (_, i) => i)
+      .filter(i => !this.uploaded.has(i));
+    let idx = 0;
+
+    const worker = async () => {
+      while (idx < pending.length) {
+        if (this.status !== "uploading") return;
+        const i = pending[idx++];
+        await this.sendChunk(i);
+        this.uploaded.add(i);
+        this.reportProgress();
       }
-      await this.sendChunk(i);
-      this.uploaded.add(i);
-      this.reportProgress();
-    }
+    };
+
+    await Promise.all(Array.from({ length: UPLOAD_CONCURRENCY }, worker));
   }
 
   private sendChunk(index: number): Promise<void> {
     const start = index * this.chunkSize;
     const end = Math.min(start + this.chunkSize, this.file.size);
     const blob = this.file.slice(start, end);
-    const baseLoaded = this.loaded();
 
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      this.currentXhr = xhr;
+      this.activeXhrs.add(xhr);
+      this.chunkProgress.set(index, 0);
+
+      const cleanup = () => {
+        this.activeXhrs.delete(xhr);
+        this.chunkProgress.delete(index);
+      };
+
       xhr.open(
         "POST",
         `${this.base}/api/upload/${encodeURIComponent(this.uploadId)}/chunk/${index}`,
@@ -219,12 +241,12 @@ export class ChunkedUploader {
       for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
-          const loaded = Math.min(baseLoaded + e.loaded, this.file.size);
-          this.opts.onProgress?.(loaded, this.file.size);
+          this.chunkProgress.set(index, e.loaded);
+          this.reportProgress();
         }
       };
       xhr.onload = () => {
-        this.currentXhr = undefined;
+        cleanup();
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const data: ChunkResp = JSON.parse(xhr.responseText);
@@ -238,11 +260,11 @@ export class ChunkedUploader {
         }
       };
       xhr.onerror = () => {
-        this.currentXhr = undefined;
+        cleanup();
         reject(new Error("网络错误"));
       };
       xhr.onabort = () => {
-        this.currentXhr = undefined;
+        cleanup();
         reject(new Error("aborted"));
       };
       xhr.send(blob);
