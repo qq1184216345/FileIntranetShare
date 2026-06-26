@@ -25,3 +25,6 @@ dist-ssr
 
 # Release notes 本地草稿（用于复制粘贴到 GitHub Release 页）
 RELEASE_NOTES_*.md
+
+# OMC 编排会话状态（本地工具产物，勿提交）
+.omc/
